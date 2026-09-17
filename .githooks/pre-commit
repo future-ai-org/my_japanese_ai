@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+if [[ ! -x backend/.venv/bin/python ]]; then
+  printf 'pre-commit: backend/.venv is missing. Run `make setup` first.\n' >&2
+  exit 1
+fi
+
+if [[ ! -d frontend/node_modules ]]; then
+  printf 'pre-commit: frontend/node_modules is missing. Run `make setup` first.\n' >&2
+  exit 1
+fi
+
+# Lint is its own step so a later change to `make precommit` cannot skip it.
+printf 'pre-commit: running make lint\n'
+if ! make lint; then
+  printf '\npre-commit: lint failed. Fix the findings before committing.\n' >&2
+  exit 1
+fi
+
+printf 'pre-commit: running make test\n'
+if ! make test; then
+  printf '\npre-commit: tests failed. Fix them before committing.\n' >&2
+  exit 1
+fi

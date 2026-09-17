@@ -1,0 +1,1 @@
+"""Japanese AI FastAPI backend."""
