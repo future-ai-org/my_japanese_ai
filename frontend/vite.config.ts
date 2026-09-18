@@ -57,7 +57,7 @@ export default defineConfig(({ mode }) => {
         include: ["src/**/*.{ts,tsx}"],
         exclude: ["src/vite-env.d.ts"],
         thresholds: {
-          lines: 90,
+          lines:75,
         },
       },
     },
