@@ -21,7 +21,7 @@ describe("HistoryPanel", () => {
         {...actions}
       />,
     );
-    expect(screen.getByText("Loading lesson history…")).toBeInTheDocument();
+    expect(screen.getByText("Loading review history…")).toBeInTheDocument();
   });
 
   it("shows an empty library and surfaces load errors", () => {
@@ -34,11 +34,11 @@ describe("HistoryPanel", () => {
       />,
     );
 
-    expect(screen.getByText("No saved conversation yet")).toBeInTheDocument();
+    expect(screen.getByText("No saved reviews yet")).toBeInTheDocument();
     expect(screen.getByText("Could not load history.")).toBeInTheDocument();
   });
 
-  it("opens and deletes saved reviews", async () => {
+  it("opens and deletes saved reviews, including unlabeled providers", async () => {
     const onOpen = vi.fn();
     const onDelete = vi.fn();
     const view = userEvent.setup();
@@ -53,6 +53,7 @@ describe("HistoryPanel", () => {
             modelId: undefined,
             temperature: undefined,
             maxTokens: undefined,
+            maxFindings: undefined,
             durationMs: undefined,
           },
           {
@@ -74,20 +75,25 @@ describe("HistoryPanel", () => {
       />,
     );
 
-    expect(screen.getAllByText("Polite").length).toBeGreaterThan(0);
-    expect(screen.queryByText("Browser WebLLM")).not.toBeInTheDocument();
-    expect(screen.queryByText("mystery")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Python").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Browser WebLLM").length).toBeGreaterThan(0);
+    expect(screen.getByText("mystery")).toBeInTheDocument();
     expect(screen.getByText("test-model")).toBeInTheDocument();
     expect(screen.queryByText("Empty submission")).not.toBeInTheDocument();
     expect(screen.queryByText("pass")).not.toBeInTheDocument();
-    expect(screen.getAllByText("よろしくお願いします。").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Solid work")).not.toBeInTheDocument();
     expect(screen.getByText("Temp 0.2")).toBeInTheDocument();
     expect(screen.getByText("256 tokens")).toBeInTheDocument();
+    expect(screen.queryByText("3 findings")).not.toBeInTheDocument();
     expect(
       [...document.querySelectorAll(".history-card__meta")].map((row) =>
         [...row.querySelectorAll("span")].map((tag) => tag.textContent),
       ),
-    ).toEqual([["Polite"], ["Polite"], ["Polite"]]);
+    ).toEqual([
+      ["Browser WebLLM", "Python"],
+      ["Browser WebLLM", "Python"],
+      ["mystery", "Python"],
+    ]);
     expect(
       [...document.querySelectorAll(".history-card__params")].map((row) =>
         [...row.querySelectorAll("span")].map((tag) => tag.textContent),
@@ -107,29 +113,29 @@ describe("HistoryPanel", () => {
 
     await view.click(
       screen.getAllByRole("button", {
-        name: "Polite",
+        name: "Browser WebLLM Python",
       })[0],
     );
     expect(onOpen).toHaveBeenCalledWith(historySummary);
 
-    await view.click(screen.getAllByRole("button", { name: "Delete saved lesson" })[0]);
+    await view.click(screen.getAllByRole("button", { name: "Delete saved review" })[0]);
     expect(onDelete).not.toHaveBeenCalled();
     await view.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onDelete).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    await view.click(screen.getAllByRole("button", { name: "Delete saved lesson" })[0]);
+    await view.click(screen.getAllByRole("button", { name: "Delete saved review" })[0]);
     await view.click(screen.getByRole("button", { name: "Delete" }));
     expect(onDelete).toHaveBeenCalledWith(historySummary.id);
   });
 
-  it("labels Formal and Casual history entries", () => {
+  it("labels Go, Rust, and C++ history entries", () => {
     render(
       <HistoryPanel
         entries={[
-          { ...historySummary, id: "formal-review", language: "formal" },
-          { ...historySummary, id: "formal-b-review", language: "formal" },
-          { ...historySummary, id: "casual-review", language: "casual" },
+          { ...historySummary, id: "go-review", language: "go" },
+          { ...historySummary, id: "rust-review", language: "rust" },
+          { ...historySummary, id: "cpp-review", language: "cpp" },
         ]}
         isLoading={false}
         error={null}
@@ -137,8 +143,9 @@ describe("HistoryPanel", () => {
       />,
     );
 
-    expect(screen.getAllByText("Formal").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("Casual")).toBeInTheDocument();
+    expect(screen.getByText("Go")).toBeInTheDocument();
+    expect(screen.getByText("Rust")).toBeInTheDocument();
+    expect(screen.getByText("C++")).toBeInTheDocument();
   });
 
   it("stars favorites and lists them above recent reviews", async () => {
@@ -163,12 +170,12 @@ describe("HistoryPanel", () => {
     const articles = screen.getAllByRole("article");
     expect(
       within(articles[0]).getByRole("button", {
-        name: "Polite",
+        name: "Browser WebLLM Python",
       }),
     ).toBeInTheDocument();
     expect(
       within(articles[1]).getByRole("button", {
-        name: "Polite",
+        name: "Browser WebLLM Python",
       }),
     ).toBeInTheDocument();
     const favoriteIcon = articles[0].querySelector(
@@ -202,7 +209,7 @@ describe("HistoryPanel", () => {
     const tags = [
       ...document.querySelectorAll(".history-card__params span"),
     ].map((tag) => tag.textContent);
-    expect(titles).toEqual(["Polite"]);
+    expect(titles).toEqual(["Browser WebLLM", "Python"]);
     expect(tags).toContain(REVIEW_CONFIG.model.label);
     expect(tags).toContain("1 lines");
     expect(tags).toContain("4 characters");
@@ -228,6 +235,7 @@ describe("HistoryPanel", () => {
             modelId: undefined,
             temperature: undefined,
             maxTokens: undefined,
+            maxFindings: undefined,
             durationMs: undefined,
           },
         ]}
@@ -244,15 +252,15 @@ describe("HistoryPanel", () => {
     expect(document.querySelectorAll(".history-card__params")).toHaveLength(1);
   });
 
-  it("shows the Japanese translation preview", () => {
+  it("colors the grade note by score band", () => {
     render(
       <HistoryPanel
         entries={[
-          {
-            ...historySummary,
-            id: "one",
-            translation: "よろしくお願いします。",
-          },
+          { ...historySummary, id: "strong", score: 94 },
+          { ...historySummary, id: "good", score: 82 },
+          { ...historySummary, id: "fair", score: 72 },
+          { ...historySummary, id: "poor", score: 40 },
+          { ...historySummary, id: "critical", score: 12 },
         ]}
         isLoading={false}
         error={null}
@@ -260,9 +268,13 @@ describe("HistoryPanel", () => {
       />,
     );
 
-    expect(screen.getAllByText("よろしくお願いします。").length).toBeGreaterThan(0);
-    expect(document.querySelectorAll(".history-card__translation")).toHaveLength(
-      1,
-    );
+    const notes = [...document.querySelectorAll(".history-score")];
+    expect(notes.map((note) => [...note.classList])).toEqual([
+      ["history-score", "history-score--strong"],
+      ["history-score", "history-score--good"],
+      ["history-score", "history-score--fair"],
+      ["history-score", "history-score--poor"],
+      ["history-score", "history-score--critical"],
+    ]);
   });
 });

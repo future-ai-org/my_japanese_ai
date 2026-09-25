@@ -1,9 +1,17 @@
-import { stripTeachingMarkup } from "../shared/review";
+import { APP_CONFIG, clampScore } from "../config/app";
+import {
+  coerceNumber,
+  collectMetrics,
+  readReviewFinding,
+} from "../shared/review";
 import type { ReviewResult } from "../types/review";
 
 export interface PartialReviewPayload {
-  translation?: string;
-  lesson?: string;
+  score?: number;
+  summary?: string;
+  rationale?: string;
+  metrics?: unknown[];
+  findings?: unknown[];
 }
 
 function skipWs(source: string, index: number): number {
@@ -145,11 +153,9 @@ function parseCompleteValue(
   if (end === null) return null;
   try {
     return { value: JSON.parse(source.slice(index, end)), end };
-    /* v8 ignore start */
   } catch {
     return null;
   }
-  /* v8 ignore stop */
 }
 
 function parseOpenString(source: string, index: number): string | undefined {
@@ -158,9 +164,13 @@ function parseOpenString(source: string, index: number): string | undefined {
   let raw = "";
   while (cursor < source.length) {
     const char = source[cursor];
-    // A closed string is handled by parseCompleteValue; this path is only for
-    // still-streaming quotes.
-    if (char === '"') return undefined;
+    if (char === '"') {
+      try {
+        return JSON.parse(source.slice(index, cursor + 1)) as string;
+      } catch {
+        return raw;
+      }
+    }
     if (char === "\\") {
       if (cursor + 1 >= source.length) break;
       raw += source.slice(cursor, cursor + 2);
@@ -175,6 +185,74 @@ function parseOpenString(source: string, index: number): string | undefined {
   } catch {
     return raw;
   }
+}
+
+function parsePartialObject(
+  source: string,
+  index: number,
+): { value: Record<string, unknown>; end: number } | null {
+  index = skipWs(source, index);
+  if (source[index] !== "{") return null;
+  index += 1;
+  const value: Record<string, unknown> = {};
+  while (index < source.length) {
+    index = skipWs(source, index);
+    if (index >= source.length || source[index] === "}") break;
+    if (source[index] === ",") {
+      index += 1;
+      continue;
+    }
+    const keyEnd = scanStringEnd(source, index);
+    if (keyEnd === null) break;
+    let key: string;
+    try {
+      key = JSON.parse(source.slice(index, keyEnd)) as string;
+    } catch {
+      break;
+    }
+    index = skipWs(source, keyEnd);
+    if (source[index] !== ":") break;
+    index = skipWs(source, index + 1);
+    const parsed = parseCompleteValue(source, index);
+    if (!parsed) {
+      const partial = parseOpenString(source, index);
+      if (partial !== undefined) value[key] = partial;
+      break;
+    }
+    value[key] = parsed.value;
+    index = parsed.end;
+  }
+  return Object.keys(value).length ? { value, end: index } : null;
+}
+
+function parseObjectArray(
+  source: string,
+  index: number,
+): { values: unknown[]; end: number; closed: boolean } | null {
+  index = skipWs(source, index);
+  if (source[index] !== "[") return null;
+  index += 1;
+  const values: unknown[] = [];
+  while (index < source.length) {
+    index = skipWs(source, index);
+    if (index >= source.length) break;
+    if (source[index] === "]") {
+      return { values, end: index + 1, closed: true };
+    }
+    if (source[index] === ",") {
+      index += 1;
+      continue;
+    }
+    const parsed = parseCompleteValue(source, index);
+    if (!parsed) {
+      const partial = parsePartialObject(source, index);
+      if (partial) values.push(partial.value);
+      break;
+    }
+    values.push(parsed.value);
+    index = parsed.end;
+  }
+  return { values, end: index, closed: false };
 }
 
 export function parsePartialReview(text: string): PartialReviewPayload | null {
@@ -197,39 +275,49 @@ export function parsePartialReview(text: string): PartialReviewPayload | null {
     let key: string;
     try {
       key = JSON.parse(text.slice(index, keyEnd)) as string;
-      /* v8 ignore start */
     } catch {
       break;
     }
-    /* v8 ignore stop */
     index = skipWs(text, keyEnd);
     if (text[index] !== ":") break;
     index = skipWs(text, index + 1);
 
+    if (key === "metrics" || key === "findings") {
+      if (key === "metrics" && text[index] === "{") {
+        const parsedObject = parseCompleteValue(text, index);
+        const record = parsedObject
+          ? parsedObject.value
+          : parsePartialObject(text, index)?.value;
+        if (!record || typeof record !== "object" || Array.isArray(record)) break;
+        const metrics = collectMetrics(record);
+        payload.metrics = metrics;
+        if (metrics.length) found = true;
+        index = parsedObject?.end ?? text.length;
+        if (!parsedObject) break;
+        continue;
+      }
+      const parsed = parseObjectArray(text, index);
+      if (!parsed) break;
+      payload[key] = parsed.values;
+      if (parsed.values.length) found = true;
+      index = parsed.end;
+      if (!parsed.closed) break;
+      continue;
+    }
+
     const parsed = parseCompleteValue(text, index);
-    if (!parsed) {
-      const open = parseOpenString(text, index);
-      if (open === undefined) break;
-      if (key === "translation" || key === "summary") {
-        payload.translation = open;
-        found = true;
-      } else if (key === "lesson" || key === "rationale") {
-        payload.lesson = open;
+    if (!parsed) break;
+    if (key === "score") {
+      const score = coerceNumber(parsed.value);
+      if (score !== undefined) {
+        payload.score = score;
         found = true;
       }
-      break;
-    }
-    if (
-      (key === "translation" || key === "summary") &&
-      typeof parsed.value === "string"
-    ) {
-      payload.translation = parsed.value;
+    } else if (key === "summary" && typeof parsed.value === "string") {
+      payload.summary = parsed.value;
       found = true;
-    } else if (
-      (key === "lesson" || key === "rationale") &&
-      typeof parsed.value === "string"
-    ) {
-      payload.lesson = parsed.value;
+    } else if (key === "rationale" && typeof parsed.value === "string") {
+      payload.rationale = parsed.value;
       found = true;
     }
     index = parsed.end;
@@ -240,15 +328,26 @@ export function parsePartialReview(text: string): PartialReviewPayload | null {
 
 export function reviewResultFromPartial(
   payload: PartialReviewPayload,
-  options: { durationMs: number },
+  options: { lineCount: number; durationMs: number; maxFindings: number },
 ): ReviewResult | undefined {
-  if (payload.translation === undefined && payload.lesson === undefined) {
-    return undefined;
-  }
+  if (typeof payload.score !== "number") return undefined;
+  const metrics = collectMetrics(payload.metrics ?? []);
+  const findings = (payload.findings ?? [])
+    .slice(0, options.maxFindings)
+    .flatMap((finding, index) => {
+      const item = readReviewFinding(finding, index, {
+        lineCount: options.lineCount,
+        createId: () => "live",
+      });
+      return item ? [item] : [];
+    });
 
   return {
-    translation: payload.translation ?? "",
-    lesson: stripTeachingMarkup(payload.lesson ?? ""),
+    score: clampScore(payload.score ?? APP_CONFIG.score.min),
+    summary: payload.summary ?? "",
+    rationale: payload.rationale,
+    metrics,
+    findings,
     durationMs: options.durationMs,
     partial: true,
   };
@@ -256,8 +355,17 @@ export function reviewResultFromPartial(
 
 function partialSignature(result: ReviewResult): string {
   return JSON.stringify({
-    translation: result.translation,
-    lesson: result.lesson,
+    score: result.score,
+    summary: result.summary,
+    rationale: result.rationale ?? "",
+    metrics: result.metrics,
+    findings: result.findings.map((finding) => ({
+      severity: finding.severity,
+      title: finding.title,
+      description: finding.description,
+      line: finding.line,
+      suggestion: finding.suggestion,
+    })),
   });
 }
 

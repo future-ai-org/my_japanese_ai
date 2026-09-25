@@ -25,7 +25,7 @@ router = APIRouter(prefix=API_AUTH_PREFIX)
 
 
 def _lockout_response() -> JSONResponse:
-    retry_after = _get_lockout_seconds()
+    retry_after = get_lockout_seconds()
     return JSONResponse(
         {"error": "Too many attempts. Try again shortly."},
         status_code=429,
@@ -33,7 +33,7 @@ def _lockout_response() -> JSONResponse:
     )
 
 
-def _get_lockout_seconds() -> int:
+def get_lockout_seconds() -> int:
     return get_settings().login_window_minutes * 60
 
 
@@ -81,12 +81,11 @@ async def register(request: Request) -> JSONResponse:
 
     ip_address = client_ip(request)
     try:
+        password_hash = await hash_password(password)
         pool = await get_pool()
         async with pool.connection() as connection:
             if await register_locked(connection, ip_address):
                 return _lockout_response()
-        password_hash = await hash_password(password)
-        async with pool.connection() as connection:
             cursor = await connection.execute(
                 """
                 INSERT INTO users (id, name, email, password_hash)
@@ -177,7 +176,6 @@ async def export_account(request: Request) -> JSONResponse:
         user = await _require_user(request)
         if isinstance(user, JSONResponse):
             return user
-        limit = get_settings().export_max_reviews
         pool = await get_pool()
         async with pool.connection() as connection:
             cursor = await connection.execute(
@@ -186,19 +184,14 @@ async def export_account(request: Request) -> JSONResponse:
                 FROM review_history
                 WHERE user_id = %s
                 ORDER BY starred DESC, created_at DESC
-                LIMIT %s
                 """,
-                (user["id"], limit + 1),
+                (user["id"],),
             )
             rows = await cursor.fetchall()
-        truncated = len(rows) > limit
-        if truncated:
-            rows = rows[:limit]
         return JSONResponse(
             {
                 "exportedAt": now_iso(),
                 "user": user,
-                "truncated": truncated,
                 "reviews": [
                     {
                         "id": str(row["id"]),

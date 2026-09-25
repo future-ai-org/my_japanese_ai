@@ -3,8 +3,9 @@ import { Clock3, Code2, LoaderCircle, Star, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { reviewModelForRuntimeId } from "../config/review";
 import { LANGUAGE_LABELS } from "../data/examples";
-import { t } from "../i18n/messages";
-import type { ReviewHistorySummary } from "../types/review";
+import { useLocale } from "../i18n/locale";
+import { scoreBand } from "../review/score";
+import type { InferenceProvider, ReviewHistorySummary } from "../types/review";
 
 interface HistoryPanelProps {
   entries: ReviewHistorySummary[];
@@ -15,6 +16,13 @@ interface HistoryPanelProps {
   onDelete: (id: string) => void;
 }
 
+const INFERENCE_KEYS: Record<InferenceProvider, "history.browser" | "history.modal" | "history.huggingface" | "history.custom"> = {
+  browser: "history.browser",
+  modal: "history.modal",
+  huggingface: "history.huggingface",
+  custom: "history.custom",
+};
+
 export function HistoryPanel({
   entries,
   isLoading,
@@ -23,13 +31,20 @@ export function HistoryPanel({
   onStar,
   onDelete,
 }: HistoryPanelProps) {
+  const { locale, t } = useLocale();
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
-  const dateFormatter = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  const dateFormatter = new Intl.DateTimeFormat(
+    locale === "ja" ? "ja-JP" : undefined,
+    { dateStyle: "medium", timeStyle: "short" },
+  );
   const starredEntries = entries.filter((entry) => entry.starred);
   const recentEntries = entries.filter((entry) => !entry.starred);
+
+  const inferenceLabel = (entry: ReviewHistorySummary): string => {
+    if (!entry.provider) return t("history.browser");
+    const key = INFERENCE_KEYS[entry.provider as InferenceProvider];
+    return key ? t(key) : entry.provider;
+  };
 
   const modelLabel = (entry: ReviewHistorySummary): string | undefined => {
     const labeled = reviewModelForRuntimeId(entry.modelId)?.label;
@@ -38,8 +53,10 @@ export function HistoryPanel({
   };
 
   const identityLabels = (entry: ReviewHistorySummary): string[] => {
+    const labels = [inferenceLabel(entry)];
     const language = LANGUAGE_LABELS[entry.language];
-    return language ? [language] : [];
+    if (language) labels.push(language);
+    return labels;
   };
 
   const parameterLabels = (entry: ReviewHistorySummary): string[] => {
@@ -115,9 +132,12 @@ export function HistoryPanel({
                 ))}
               </div>
             )}
-            {entry.translation ? (
-              <p className="history-card__translation">{entry.translation}</p>
-            ) : null}
+          </div>
+          <div
+            className={`history-score history-score--${scoreBand(entry.score)}`}
+          >
+            <strong>{entry.score}</strong>
+            <span>{t("history.score")}</span>
           </div>
         </button>
         <div className="history-card__actions">

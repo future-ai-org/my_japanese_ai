@@ -2,21 +2,34 @@ from datetime import UTC, datetime
 
 from app import auth as auth_module
 from app.auth import public_user
-from app.config import get_settings
+from app.config import DEFAULT_TEMPERATURE, get_settings
+from app.inference import CloudInferenceError
 from app.routes import auth as auth_routes
-from app.routes import history
+from app.routes import history, review
 from app.util import isoformat
 from tests.helpers import anonymous, current_user, patch_pool
 
+REVIEW_BODY = {
+    "provider": "modal",
+    "language": "python",
+    "code": "pass",
+    "parameters": {
+        "temperature": DEFAULT_TEMPERATURE,
+        "maxTokens": 256,
+        "maxFindings": 1,
+    },
+}
 HISTORY_RESULT = {
-    "translation": "よろしくお願いします。",
-    "lesson": "Use a polite closing.",
+    "score": 100,
+    "summary": "Good",
+    "findings": [],
+    "metrics": [],
     "durationMs": 1,
 }
 HISTORY_ID = "8f4cb94c-3396-4d33-9582-b16dcb884ec6"
 HISTORY_ROW = {
     "id": HISTORY_ID,
-    "language": "polite",
+    "language": "python",
     "code": "pass",
     "result": HISTORY_RESULT,
     "starred": False,
@@ -24,16 +37,18 @@ HISTORY_ROW = {
 }
 HISTORY_SUMMARY_ROW = {
     "id": HISTORY_ID,
-    "language": "polite",
+    "language": "python",
     "code_preview": "pass",
     "line_count": 1,
     "character_count": 4,
-    "translation": "よろしくお願いします。",
-    "provider": "browser",
+    "summary": "Good",
+    "score": 100,
+    "provider": "modal",
     "model_id": "test-model",
     "generation_config": {
         "temperature": 0.2,
         "maxTokens": 256,
+        "maxFindings": 1,
     },
     "duration_ms": 1,
     "starred": False,
@@ -48,6 +63,10 @@ USER_ROW = {
 }
 
 
+def _sign_in_review(monkeypatch):
+    monkeypatch.setattr(review, "get_current_user", current_user())
+
+
 def _sign_in_history(monkeypatch):
     monkeypatch.setattr(history, "get_current_user", current_user())
 
@@ -56,11 +75,7 @@ def _history_pool(monkeypatch, *, listed=HISTORY_SUMMARY_ROW, full=HISTORY_ROW):
     def handler(query, parameters):
         if "UPDATE review_history" in query:
             starred = parameters[0] if parameters else True
-            return {
-                key: value
-                for key, value in {**listed, "starred": starred}.items()
-                if key not in {"code_preview", "line_count", "character_count"}
-            }
+            return {**listed, "starred": starred}
         if "split_part" in query:
             return listed
         if "DELETE FROM review_history" in query:
@@ -87,13 +102,220 @@ def test_health_check(client, monkeypatch):
     assert healthz == {"status": "ok", "databaseConfigured": False}
 
 
+def test_provider_metadata_does_not_expose_credentials(client, modal_env):
+    response = client.get("/api/review")
+    assert response.status_code == 200
+    providers = response.json()["providers"]
+    assert [item["id"] for item in providers] == ["modal"]
+    assert providers[0]["modelId"] == "test-model"
+    assert "secret" not in response.text
+    assert "example.modal.run" not in response.text
+    assert "url" not in providers[0]
+    assert "apiKey" not in providers[0]
+
+
+def test_cloud_review_requires_authentication(client, monkeypatch):
+    monkeypatch.setattr(review, "get_current_user", anonymous)
+    response = client.post("/api/review", json=REVIEW_BODY)
+    assert response.status_code == 401
+    assert response.json() == {"error": "Sign in to use cloud inference."}
+
+
+def test_cloud_review_rejects_invalid_payloads(client, monkeypatch, modal_env):
+    _sign_in_review(monkeypatch)
+    missing_parameters = client.post(
+        "/api/review",
+        json={"provider": "modal", "language": "python", "code": "pass"},
+    )
+    empty_code = client.post(
+        "/api/review",
+        json={
+            **REVIEW_BODY,
+            "code": "   ",
+        },
+    )
+    oversized = client.post(
+        "/api/review",
+        json={
+            **REVIEW_BODY,
+            "parameters": {
+                **REVIEW_BODY["parameters"],
+                "maxTokens": get_settings().max_tokens + 1,
+            },
+        },
+    )
+    invalid_json = client.post(
+        "/api/review",
+        content=b"not-json",
+        headers={"content-type": "application/json"},
+    )
+    unknown_language = client.post(
+        "/api/review",
+        json={**REVIEW_BODY, "language": "ruby"},
+    )
+    for response in (
+        missing_parameters,
+        empty_code,
+        oversized,
+        invalid_json,
+        unknown_language,
+    ):
+        assert response.status_code == 400
+        assert response.json() == {"error": "Invalid review request."}
+
+
+def test_cloud_review_requires_configured_provider(client, monkeypatch):
+    _sign_in_review(monkeypatch)
+    monkeypatch.delenv("MODAL_URL", raising=False)
+    monkeypatch.delenv("MODAL_API_KEY", raising=False)
+    monkeypatch.delenv("CUSTOM_INFERENCE_URL", raising=False)
+    monkeypatch.delenv("CUSTOM_INFERENCE_API_KEY", raising=False)
+    response = client.post("/api/review", json=REVIEW_BODY)
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "The selected cloud provider is not configured."
+    }
+
+
+def test_cloud_review_rate_limit(client, monkeypatch, modal_env):
+    _sign_in_review(monkeypatch)
+
+    async def none_reserved(_user_id, _provider):
+        return None
+
+    monkeypatch.setattr(review, "reserve_cloud_request", none_reserved)
+    response = client.post("/api/review", json=REVIEW_BODY)
+    assert response.status_code == 429
+    assert "Cloud review limit reached" in response.json()["error"]
+    assert response.headers["retry-after"] == "3600"
+
+
+def test_cloud_review_success_and_failure_contracts(client, monkeypatch, modal_env):
+    _sign_in_review(monkeypatch)
+    completed = []
+    captured = []
+
+    async def reserve(_user_id, _provider):
+        return "reservation-id"
+
+    async def complete(request_id, status, duration_ms):
+        completed.append((request_id, status, duration_ms))
+
+    async def succeed(*args, **kwargs):
+        captured.append((args, kwargs))
+        return {"score": 80, "summary": "Solid"}
+
+    monkeypatch.setattr(review, "reserve_cloud_request", reserve)
+    monkeypatch.setattr(review, "complete_cloud_request", complete)
+    monkeypatch.setattr(review, "run_cloud_review", succeed)
+
+    success = client.post("/api/review", json=REVIEW_BODY)
+    assert success.status_code == 200
+    assert success.json()["score"] == 80
+    assert captured[0][0][:3] == ("modal", "python", "pass")
+    assert captured[0][1] == {
+        "temperature": 0.2,
+        "max_tokens": 256,
+        "max_findings": 1,
+    }
+    assert completed[0][0] == "reservation-id"
+    assert completed[0][1] == "completed"
+
+    async def fail(*_args, **_kwargs):
+        raise CloudInferenceError(
+            "Cloud inference timed out. Try again shortly.",
+            logs=[{"id": "log-1", "message": "deadline", "stage": "cloud-http"}],
+        )
+
+    monkeypatch.setattr(review, "run_cloud_review", fail)
+    failure = client.post("/api/review", json=REVIEW_BODY)
+    assert failure.status_code == 502
+    assert failure.json()["error"].startswith("Cloud inference timed out")
+    assert failure.json()["diagnostics"]["logs"][0]["id"] == "log-1"
+    assert completed[1][1] == "failed"
+
+    async def boom(*_args, **_kwargs):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(review, "run_cloud_review", boom)
+    generic = client.post("/api/review", json=REVIEW_BODY)
+    assert generic.status_code == 502
+    assert generic.json() == {"error": "Cloud inference is temporarily unavailable."}
+
+
+def test_cloud_review_ignores_complete_failure_after_error(
+    client, monkeypatch, modal_env
+):
+    _sign_in_review(monkeypatch)
+
+    async def reserve(_user_id, _provider):
+        return "reservation-id"
+
+    async def fail_complete(_request_id, _status, _duration_ms):
+        raise RuntimeError("database down")
+
+    async def fail_review(*_args, **_kwargs):
+        raise CloudInferenceError("Cloud inference timed out. Try again shortly.")
+
+    monkeypatch.setattr(review, "reserve_cloud_request", reserve)
+    monkeypatch.setattr(review, "complete_cloud_request", fail_complete)
+    monkeypatch.setattr(review, "run_cloud_review", fail_review)
+    response = client.post("/api/review", json=REVIEW_BODY)
+    assert response.status_code == 502
+    assert response.json()["error"].startswith("Cloud inference timed out")
+
+
+def test_cloud_review_generic_error_before_reservation(client, monkeypatch):
+    async def boom(_request):
+        raise RuntimeError("auth down")
+
+    monkeypatch.setattr(review, "get_current_user", boom)
+    response = client.post("/api/review", json=REVIEW_BODY)
+    assert response.status_code == 502
+    assert response.json() == {"error": "Cloud inference is temporarily unavailable."}
+
+
+def test_cloud_inference_error_before_reservation(client, monkeypatch):
+    async def boom(_request):
+        raise CloudInferenceError("The selected cloud provider is not configured.")
+
+    monkeypatch.setattr(review, "get_current_user", boom)
+    response = client.post("/api/review", json=REVIEW_BODY)
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": "The selected cloud provider is not configured."
+    }
+
+
+def test_cloud_review_generic_error_ignores_complete_failure(
+    client, monkeypatch, modal_env
+):
+    _sign_in_review(monkeypatch)
+
+    async def reserve(_user_id, _provider):
+        return "reservation-id"
+
+    async def fail_complete(_request_id, _status, _duration_ms):
+        raise RuntimeError("database down")
+
+    async def boom(*_args, **_kwargs):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(review, "reserve_cloud_request", reserve)
+    monkeypatch.setattr(review, "complete_cloud_request", fail_complete)
+    monkeypatch.setattr(review, "run_cloud_review", boom)
+    response = client.post("/api/review", json=REVIEW_BODY)
+    assert response.status_code == 502
+    assert response.json() == {"error": "Cloud inference is temporarily unavailable."}
+
+
 def test_history_requires_authentication(client, monkeypatch):
     monkeypatch.setattr(history, "get_current_user", anonymous)
     listed = client.get("/api/history")
     fetched = client.get(f"/api/history/{HISTORY_ID}")
     saved = client.post(
         "/api/history",
-        json={"language": "polite", "code": "pass", "result": HISTORY_RESULT},
+        json={"language": "python", "code": "pass", "result": HISTORY_RESULT},
     )
     starred = client.patch(f"/api/history/{HISTORY_ID}", json={"starred": True})
     deleted = client.delete(f"/api/history/{HISTORY_ID}")
@@ -110,7 +332,7 @@ def test_history_crud_contract(client, monkeypatch):
     fetched = client.get(f"/api/history/{HISTORY_ID}")
     saved = client.post(
         "/api/history",
-        json={"language": "polite", "code": "pass", "result": HISTORY_RESULT},
+        json={"language": "python", "code": "pass", "result": HISTORY_RESULT},
     )
     starred = client.patch(f"/api/history/{HISTORY_ID}", json={"starred": True})
     deleted = client.delete(f"/api/history/{HISTORY_ID}")
@@ -118,28 +340,29 @@ def test_history_crud_contract(client, monkeypatch):
     assert listed.status_code == 200
     assert listed.json()[0] == {
         "id": HISTORY_ID,
-        "language": "polite",
+        "language": "python",
         "createdAt": "2026-01-01T00:00:00.000Z",
         "codePreview": "pass",
         "lineCount": 1,
         "characterCount": 4,
-        "translation": "よろしくお願いします。",
+        "score": 100,
+        "summary": "Good",
         "starred": False,
-        "provider": "browser",
+        "provider": "modal",
         "modelId": "test-model",
         "temperature": 0.2,
         "maxTokens": 256,
+        "maxFindings": 1,
         "durationMs": 1,
     }
     assert fetched.status_code == 200
-    assert fetched.json()["result"]["translation"] == "よろしくお願いします。"
+    assert fetched.json()["result"]["score"] == 100
     assert fetched.json()["starred"] is False
     assert saved.status_code == 201
-    assert saved.json()["result"]["translation"] == "よろしくお願いします。"
+    assert saved.json()["result"]["score"] == 100
     assert saved.json()["starred"] is False
     assert starred.status_code == 200
     assert starred.json()["starred"] is True
-    assert "codePreview" not in starred.json()
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True}
 
@@ -169,7 +392,7 @@ def test_history_invalid_identifier_and_payload(client, monkeypatch):
 
     invalid_payload = client.post(
         "/api/history",
-        json={"language": "polite", "code": "pass", "result": {"translation": "x"}},
+        json={"language": "python", "code": "pass", "result": {"score": 1}},
     )
     invalid_json = client.post(
         "/api/history",
@@ -178,7 +401,7 @@ def test_history_invalid_identifier_and_payload(client, monkeypatch):
     )
     unknown_language = client.post(
         "/api/history",
-        json={"language": "keigo", "code": "pass", "result": HISTORY_RESULT},
+        json={"language": "ruby", "code": "pass", "result": HISTORY_RESULT},
     )
     assert invalid_payload.status_code == 400
     assert invalid_json.status_code == 400
@@ -219,7 +442,7 @@ def test_history_service_errors(client, monkeypatch):
     monkeypatch.setattr(history, "get_pool", boom_pool)
     saved = client.post(
         "/api/history",
-        json={"language": "polite", "code": "pass", "result": HISTORY_RESULT},
+        json={"language": "python", "code": "pass", "result": HISTORY_RESULT},
     )
     deleted = client.delete(f"/api/history/{HISTORY_ID}")
     fetched = client.get(f"/api/history/{HISTORY_ID}")
@@ -322,14 +545,14 @@ def test_register_conflict_and_login_success(client, monkeypatch):
     )
     assert signed_in.status_code == 200
     assert signed_in.json()["user"]["email"] == "m@example.com"
-    assert "japanese_session=" in signed_in.headers["set-cookie"]
+    assert "ai_session=" in signed_in.headers["set-cookie"]
 
 
 def test_session_and_logout(client, monkeypatch):
     monkeypatch.setattr(auth_routes, "get_current_user", current_user())
 
     async def destroy(_request, response):
-        response.delete_cookie("japanese_session", path="/")
+        response.delete_cookie("ai_session", path="/")
 
     monkeypatch.setattr(auth_routes, "destroy_session", destroy)
     session = client.get("/api/auth/session")
@@ -362,7 +585,7 @@ def test_register_success_sets_session(client, monkeypatch):
     )
     assert response.status_code == 201
     assert response.json()["user"]["email"] == "m@example.com"
-    assert "japanese_session=" in response.headers["set-cookie"]
+    assert "ai_session=" in response.headers["set-cookie"]
 
 
 def test_auth_invalid_json_and_service_errors(client, monkeypatch):
@@ -420,19 +643,22 @@ def test_history_summary_serializes_optional_generation_config():
         {
             **HISTORY_SUMMARY_ROW,
             "code_preview": None,
-            "translation": None,
+            "summary": None,
+            "score": None,
             "provider": None,
             "model_id": None,
-            "generation_config": {"temperature": 0.5, "maxTokens": 128},
+            "generation_config": '{"temperature": 0.5, "maxTokens": 128}',
         }
     )
     assert compact["codePreview"] == ""
     assert compact["lineCount"] == 1
     assert compact["characterCount"] == 4
-    assert compact["translation"] == ""
+    assert compact["summary"] == ""
+    assert compact["score"] == 0
     assert "provider" not in compact
     assert compact["temperature"] == 0.5
     assert compact["maxTokens"] == 128
+    assert "maxFindings" not in compact
     assert compact["durationMs"] == 1
 
     missing_duration = history._serialize_summary(
@@ -446,34 +672,24 @@ def test_history_summary_serializes_optional_generation_config():
     assert "lineCount" not in missing_counts
     assert "characterCount" not in missing_counts
 
-    without_code_fields = history._serialize_summary(
-        {
-            key: value
-            for key, value in HISTORY_SUMMARY_ROW.items()
-            if key not in {"code_preview", "line_count", "character_count"}
-        }
-    )
-    assert "codePreview" not in without_code_fields
-    assert "lineCount" not in without_code_fields
-    assert "characterCount" not in without_code_fields
-    assert without_code_fields["starred"] is False
-
     skipped = history._serialize_summary(
         {
             **HISTORY_SUMMARY_ROW,
             "generation_config": {
                 "temperature": True,
                 "maxTokens": False,
+                "maxFindings": "3",
             },
         }
     )
     assert "temperature" not in skipped
     assert "maxTokens" not in skipped
+    assert "maxFindings" not in skipped
 
-    ignored_string_config = history._serialize_summary(
-        {**HISTORY_SUMMARY_ROW, "generation_config": '{"temperature": 0.5}'}
+    invalid = history._serialize_summary(
+        {**HISTORY_SUMMARY_ROW, "generation_config": "{not-json"}
     )
-    assert "temperature" not in ignored_string_config
+    assert "temperature" not in invalid
     assert isoformat("2026-01-01T00:00:00Z") == "2026-01-01T00:00:00.000Z"
 
 
@@ -516,44 +732,10 @@ def test_export_and_delete(client, monkeypatch):
     assert exported.status_code == 200
     assert exported.json()["user"]["email"] == "m@example.com"
     assert exported.json()["reviews"] == []
-    assert exported.json()["truncated"] is False
 
     deleted = client.post("/api/auth/delete", json={"password": "password1"})
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True}
-
-
-def test_export_truncates_to_limit(client, monkeypatch):
-    monkeypatch.setenv("EXPORT_MAX_REVIEWS", "1")
-    get_settings.cache_clear()
-    rows = [
-        {
-            "id": f"id-{index}",
-            "language": "polite",
-            "code": "pass",
-            "result": HISTORY_RESULT,
-            "starred": False,
-            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
-        }
-        for index in range(2)
-    ]
-
-    def handler(query, parameters):
-        if "FROM review_history" in query:
-            assert parameters == ("user-id", 2)
-            return rows
-        return None
-
-    patch_pool(monkeypatch, auth_routes, handler=handler)
-    monkeypatch.setattr(
-        auth_routes, "get_current_user", current_user(public_user(USER_ROW))
-    )
-    exported = client.post("/api/auth/export")
-    assert exported.status_code == 200
-    body = exported.json()
-    assert body["truncated"] is True
-    assert len(body["reviews"]) == 1
-    assert body["reviews"][0]["id"] == "id-0"
 
 
 def test_register_lockout_returns_429(client, monkeypatch):
@@ -562,10 +744,7 @@ def test_register_lockout_returns_429(client, monkeypatch):
             return {"n": 5}
         return None
 
-    async def fail_hash(_password):
-        raise AssertionError("hash_password should not run when locked")
-
-    monkeypatch.setattr(auth_routes, "hash_password", fail_hash)
+    monkeypatch.setattr(auth_routes, "hash_password", instant_hash)
     patch_pool(monkeypatch, auth_routes, handler=handler)
     response = client.post(
         "/api/auth/register",

@@ -545,8 +545,11 @@ export async function reviewCode(
   onLog?: LogListener,
   signal?: AbortSignal,
 ): Promise<ReviewResult> {
+  const capturedLogs: ReviewLogEntry[] = [];
+  const captureLog: LogListener = (entry) => capturedLogs.push(entry);
   if (onProgress) progressListeners.add(onProgress);
   if (onLog) logListeners.add(onLog);
+  logListeners.add(captureLog);
   let streamProgress: ReturnType<typeof createThrottledStreamProgress> | undefined;
   let engine: MLCEngineInterface | undefined;
 
@@ -575,7 +578,7 @@ export async function reviewCode(
       "review",
       resumeFrom
         ? "Resuming the interrupted local review."
-        : "Starting a local Japanese lesson.",
+        : "Starting a local code review.",
       {
         language: request.language,
         characters: request.code.length,
@@ -601,6 +604,18 @@ export async function reviewCode(
       text: "Prefilling the prompt on WebGPU…",
       streamedText: resumeFrom || undefined,
     });
+    publishLog("info", "generation", "Submitting the streaming inference request.", {
+      modelId: REVIEW_CONFIG.model.id,
+      systemPrompt,
+      userPrompt,
+      resumePrompt,
+      responseSchema: WEBLLM_REVIEW_SCHEMA,
+      generationConfig: request.parameters,
+      stream: true,
+      promptCharacters,
+      prefillChunkSize: REVIEW_CONFIG.model.prefillChunkSize,
+      engineReadyMs,
+    });
     publishLog(
       "info",
       "generation",
@@ -624,7 +639,9 @@ export async function reviewCode(
       const parsed = parsePartialReview(progress.streamedText);
       const next = parsed
         ? reviewResultFromPartial(parsed, {
+            lineCount,
             durationMs: elapsedMs(),
+            maxFindings: request.parameters.maxFindings,
           })
         : undefined;
       if (next && isRicherPartial(next, partialResult)) {
@@ -719,7 +736,7 @@ export async function reviewCode(
       firstTokenMs,
       completedMs: Math.round(performance.now() - startedAt),
     });
-    console.debug("[TinySwallow:model-output] Raw model output.", content);
+    publishLog("debug", "model-output", "Raw model output.", content);
 
     if (!content) {
       throw new Error("TinySwallow did not return a review.");
@@ -738,6 +755,7 @@ export async function reviewCode(
       generationConfig: {
         temperature: request.parameters.temperature,
         maxTokens: request.parameters.maxTokens,
+        maxFindings: request.parameters.maxFindings,
       },
       finishReason,
       usage,
@@ -745,12 +763,17 @@ export async function reviewCode(
       logs: [],
     };
     const result = normalizeReviewResult(parsed, {
+      lineCount,
       durationMs: elapsedMs(),
+      maxFindings: request.parameters.maxFindings,
       inference,
+      createId: () => crypto.randomUUID(),
     });
     publishLog("info", "review", "Review output validated.", {
-      translation: result.translation,
-      lesson: result.lesson,
+      score: result.score,
+      rationale: result.rationale,
+      findings: result.findings,
+      metrics: result.metrics,
     });
     onProgress?.({
       progress: 1,
@@ -761,8 +784,10 @@ export async function reviewCode(
 
     try {
       inference.runtimeStats = await engine.runtimeStatsText();
-      console.debug(
-        "[TinySwallow:runtime] WebLLM runtime statistics.",
+      publishLog(
+        "debug",
+        "runtime",
+        "WebLLM runtime statistics.",
         inference.runtimeStats,
       );
     } catch (error) {
@@ -774,7 +799,7 @@ export async function reviewCode(
       );
     }
 
-    inference.logs = [];
+    inference.logs = [...capturedLogs];
     return result;
   } catch (error) {
     if (isAbortError(error)) throw error;
@@ -791,6 +816,7 @@ export async function reviewCode(
     const detach = () => {
       if (onProgress) progressListeners.delete(onProgress);
       if (onLog) logListeners.delete(onLog);
+      logListeners.delete(captureLog);
     };
     if (engine && typeof engine.resetChat === "function") {
       void Promise.resolve(engine.resetChat())

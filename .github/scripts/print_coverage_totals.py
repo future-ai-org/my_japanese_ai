@@ -20,7 +20,7 @@ def pct(covered: int, total: int) -> float:
 def main() -> int:
     missing = [path for path in (TS_SUMMARY, PY_SUMMARY) if not path.is_file()]
     if missing:
-        print("⭐ Coverage totals are unavailable; missing:", file=sys.stderr)
+        print("🐟 Coverage totals are unavailable; missing:", file=sys.stderr)
         for path in missing:
             print(f"  {path}", file=sys.stderr)
         return 1
@@ -38,7 +38,7 @@ def main() -> int:
     combined_pct = (ts_pct * ts_total + py_pct * py_total) / (ts_total + py_total)
 
     print()
-    print("⭐ Coverage totals:")
+    print("🐟 Coverage totals:")
     print()
     print(f"  TypeScript  {ts_pct:6.2f}%")
     print(f"  Python      {py_pct:6.2f}%")

@@ -42,7 +42,7 @@ def test_csrf_rejects_cookie_post_from_unknown_origin(client):
         "/api/auth/logout",
         headers={
             "origin": "https://evil.example",
-            "cookie": "japanese_session=token",
+            "cookie": "ai_session=token",
         },
     )
     assert response.status_code == 403
@@ -53,14 +53,14 @@ def test_csrf_allows_matching_origin(client, monkeypatch):
     monkeypatch.setattr(auth_routes, "get_current_user", current_user())
 
     async def destroy(_request, response):
-        response.delete_cookie("japanese_session", path="/")
+        response.delete_cookie("ai_session", path="/")
 
     monkeypatch.setattr(auth_routes, "destroy_session", destroy)
     response = client.post(
         "/api/auth/logout",
         headers={
-            "origin": "http://localhost:8048",
-            "cookie": "japanese_session=token",
+            "origin": "http://localhost:8022",
+            "cookie": "ai_session=token",
         },
     )
     assert response.status_code == 200
@@ -68,17 +68,17 @@ def test_csrf_allows_matching_origin(client, monkeypatch):
 
 
 def test_origin_helpers():
-    assert origin_allowed("http://localhost:8048")
+    assert origin_allowed("http://localhost:8022")
     assert not origin_allowed("https://evil.example")
     assert not origin_allowed(None)
     assert (
         request_origin({"origin": "https://review.example/"})
         == "https://review.example"
     )
-    assert request_origin({"referer": "http://localhost:8048/sign-in"}) == (
-        "http://localhost:8048"
+    assert request_origin({"referer": "http://localhost:8022/sign-in"}) == (
+        "http://localhost:8022"
     )
-    assert has_session_cookie("japanese_session=abc; other=1")
+    assert has_session_cookie("ai_session=abc; other=1")
     assert not has_session_cookie("other=1")
 
 

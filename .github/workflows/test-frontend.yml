@@ -15,21 +15,21 @@ concurrency:
 
 jobs:
   test-frontend:
-    name: ⭐ Frontend tests
+    name: 🐟 Frontend tests
     runs-on: ubuntu-latest
     steps:
-      - name: ⭐ Check out repository
+      - name: 🐟 Check out repository
         uses: actions/checkout@v5
 
-      - name: ⭐ Set up Node.js
+      - name: 🐟 Set up Node.js
         uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: ⭐ Install frontend dependencies
+      - name: 🐟 Install frontend dependencies
         run: npm --prefix frontend ci --loglevel=error
 
-      - name: ⭐ Test frontend
+      - name: 🐟 Test frontend
         run: make test-js

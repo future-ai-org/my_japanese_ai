@@ -10,7 +10,7 @@ describe("WebGPU unavailable errors", () => {
   it("matches missing-API and missing-adapter copy", () => {
     expect(isWebGpuUnavailableMessage(WEBGPU_UNAVAILABLE_MESSAGE)).toBe(true);
     expect(isWebGpuUnavailableMessage(WEBGPU_ADAPTER_MESSAGE)).toBe(true);
-    expect(isWebGpuUnavailableMessage("Could not run the lesson.")).toBe(false);
+    expect(isWebGpuUnavailableMessage("Could not run the review.")).toBe(false);
     expect(isWebGpuUnavailableError(new Error(WEBGPU_UNAVAILABLE_MESSAGE))).toBe(
       true,
     );

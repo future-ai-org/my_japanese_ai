@@ -1,6 +1,6 @@
 import { memo, useLayoutEffect, useRef } from "react";
 import { APP_CONFIG } from "../config/app";
-import { t } from "../i18n/messages";
+import { useLocale } from "../i18n/locale";
 
 interface StreamPreviewProps {
   text: string;
@@ -9,6 +9,7 @@ interface StreamPreviewProps {
 export const StreamPreview = memo(function StreamPreview({
   text,
 }: StreamPreviewProps) {
+  const { t } = useLocale();
   const scrollerRef = useRef<HTMLPreElement>(null);
   const stickToBottom = useRef(true);
 

@@ -9,6 +9,8 @@ export type BrowserReviewingPhase =
 export const BROWSER_PREFILL_PHASE_SECONDS =
   REVIEW_CONFIG.phases.browserPrefillSeconds;
 
+const REVIEW_ACTIVITY_STAGES = new Set(["review", "generation", "runtime"]);
+
 export function browserReviewingPhase(
   elapsedSeconds: number,
   progress?: { text?: string; streamedText?: string } | null,
@@ -23,4 +25,8 @@ export function browserReviewingPhase(
     return "prefill";
   }
   return "submit";
+}
+
+export function isBrowserReviewActivityLog(stage: string): boolean {
+  return REVIEW_ACTIVITY_STAGES.has(stage);
 }

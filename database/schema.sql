@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS review_history (
   id UUID PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   language TEXT NOT NULL
-    CHECK (language IN ('casual', 'polite', 'formal')),
+    CHECK (language IN ('python', 'javascript', 'typescript', 'go', 'rust', 'cpp')),
   code TEXT NOT NULL,
   result JSONB NOT NULL,
   starred BOOLEAN NOT NULL DEFAULT FALSE,
@@ -49,15 +49,22 @@ CREATE TABLE IF NOT EXISTS review_history (
 );
 
 ALTER TABLE review_history ADD COLUMN IF NOT EXISTS starred BOOLEAN NOT NULL DEFAULT FALSE;
--- Drop legacy programming-language history before tightening the register check.
-DELETE FROM review_history
-  WHERE language NOT IN ('casual', 'polite', 'formal');
 ALTER TABLE review_history DROP CONSTRAINT IF EXISTS review_history_language_check;
 ALTER TABLE review_history ADD CONSTRAINT review_history_language_check
-  CHECK (language IN ('casual', 'polite', 'formal'));
+  CHECK (language IN ('python', 'javascript', 'typescript', 'go', 'rust', 'cpp'));
 
--- Legacy cloud rate-limit rows are unused (browser WebLLM only).
-DROP TABLE IF EXISTS inference_requests;
+CREATE TABLE IF NOT EXISTS inference_requests (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL CHECK (provider IN ('modal', 'huggingface', 'custom')),
+  status TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+  duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE inference_requests DROP CONSTRAINT IF EXISTS inference_requests_provider_check;
+ALTER TABLE inference_requests ADD CONSTRAINT inference_requests_provider_check
+  CHECK (provider IN ('modal', 'huggingface', 'custom'));
 
 CREATE INDEX IF NOT EXISTS review_history_user_created_idx
   ON review_history (user_id, created_at DESC);
@@ -71,3 +78,7 @@ CREATE INDEX IF NOT EXISTS auth_attempts_email_created_idx
   ON auth_attempts (email, created_at DESC);
 CREATE INDEX IF NOT EXISTS auth_attempts_ip_created_idx
   ON auth_attempts (ip_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS inference_requests_user_created_idx
+  ON inference_requests (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS inference_requests_created_idx
+  ON inference_requests (created_at);

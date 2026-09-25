@@ -82,10 +82,20 @@ def test_lifespan_closes_shared_clients(monkeypatch):
     async def fake_close_pool():
         closed.append("pool")
 
+    async def fake_close_http():
+        closed.append("http")
+
     monkeypatch.setattr("app.main.close_pool", fake_close_pool)
+    monkeypatch.setattr("app.main.close_http_client", fake_close_http)
+
+    async def fake_get_http():
+        closed.append("open-http")
+        return object()
+
+    monkeypatch.setattr("app.main.get_http_client", fake_get_http)
     with TestClient(app):
         pass
-    assert closed == ["pool"]
+    assert closed == ["open-http", "http", "pool"]
 
 
 def test_openapi_and_docs_are_disabled(client):

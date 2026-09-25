@@ -1,8 +1,10 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { t } from "../i18n/messages";
+import { useLocale } from "../i18n/locale";
+import { translate, type Locale } from "../i18n/messages";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
+  locale?: Locale;
 }
 
 interface ErrorBoundaryState {
@@ -20,21 +22,22 @@ export class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("japanese review crashed.", error, info.componentStack);
+    console.error("AI code review crashed.", error, info.componentStack);
   }
 
   render() {
     if (!this.state.error) return this.props.children;
+    const locale = this.props.locale ?? "en";
     return (
       <section className="error-view" role="alert">
-        <h1>{t("error.title")}</h1>
-        <p>{t("error.body")}</p>
+        <h1>{translate(locale, "error.title")}</h1>
+        <p>{translate(locale, "error.body")}</p>
         <button
           className="run-button"
           type="button"
           onClick={() => window.location.reload()}
         >
-          {t("error.reload")}
+          {translate(locale, "error.reload")}
         </button>
       </section>
     );
@@ -42,5 +45,6 @@ export class ErrorBoundary extends Component<
 }
 
 export function AppErrorBoundary({ children }: { children: ReactNode }) {
-  return <ErrorBoundary>{children}</ErrorBoundary>;
+  const { locale } = useLocale();
+  return <ErrorBoundary locale={locale}>{children}</ErrorBoundary>;
 }

@@ -1,1 +1,1 @@
-"""Japanese AI FastAPI backend."""
+"""AI Code Review FastAPI backend."""

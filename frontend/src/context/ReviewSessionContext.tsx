@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { APP_CONFIG } from "../config/app";
 import {
   REVIEW_CONFIG,
   parametersForModel,
@@ -15,7 +16,13 @@ import {
 import { EXAMPLES } from "../data/examples";
 import { useToast } from "./ToastContext";
 import { useSession } from "./SessionContext";
-import { t } from "../i18n/messages";
+import { useLocale } from "../i18n/locale";
+import { inferenceProviderLabelKey } from "../i18n/messages";
+import { appendReviewLog } from "../review/activityLog";
+import {
+  isCloudStartupError,
+  isCloudStartupMessage,
+} from "../review/cloudError";
 import {
   checkpointMatches,
   isReviewInterruptedError,
@@ -32,12 +39,16 @@ import {
   toHistorySummary,
 } from "../services/history";
 import { preloadBrowserModel, type ModelProgress } from "../services/review";
+import { listInferenceProviders } from "../services/reviewCloud";
 import { runReview } from "../services/reviewRunner";
 import {
   isInferenceProvider,
   type InferenceProvider,
+  type InferenceProviderInfo,
   type Language,
+  type ReviewFinding,
   type ReviewHistorySummary,
+  type ReviewLogEntry,
   type ReviewParameters,
   type ReviewResult,
 } from "../types/review";
@@ -52,7 +63,11 @@ function clampTemperature(value: number): number {
   return Number(Math.min(max, Math.max(min, stepped)).toFixed(2));
 }
 
-export type ReviewErrorKind = "generic" | "webgpu";
+const browserParameters: ReviewParameters = parametersForModel(
+  REVIEW_CONFIG.model,
+);
+
+export type ReviewErrorKind = "generic" | "startup" | "webgpu";
 export type SaveReviewOutcome = "saved" | "need-auth" | "failed";
 
 function visibleReviewError(message: string): string {
@@ -60,6 +75,7 @@ function visibleReviewError(message: string): string {
 }
 
 function kindForReviewError(error: unknown): ReviewErrorKind {
+  if (isCloudStartupError(error)) return "startup";
   if (isWebGpuUnavailableError(error)) return "webgpu";
   return "generic";
 }
@@ -68,30 +84,41 @@ interface ReviewSessionValue {
   language: Language;
   code: string;
   result: ReviewResult | null;
+  selectedFinding: string | null;
   isReviewing: boolean;
   reviewError: string | null;
   reviewErrorKind: ReviewErrorKind | null;
   provider: InferenceProvider;
   modelId: string;
+  cloudProviders: InferenceProviderInfo[];
   parameters: ReviewParameters;
+  providerOptions: { id: InferenceProvider; label: string; hint?: string }[];
+  providerLabel: string;
   modelOptions: { id: string; label: string }[];
   selectedModelOption: { id: string; label: string } | undefined;
   selectedBrowserModel: ReturnType<typeof reviewModelForRuntimeId>;
+  selectedCloudModel: InferenceProviderInfo | undefined;
   showModelDetails: boolean;
   tokenOptions: { value: number; labelKey: (typeof TOKEN_CHOICES)[number]["labelKey"] }[];
   selectedTokenOption:
     | { value: number; labelKey: (typeof TOKEN_CHOICES)[number]["labelKey"] }
     | undefined;
   modelProgress: ModelProgress | null;
+  modelLogs: ReviewLogEntry[];
+  showDiagnostics: boolean;
+  canOpenDiagnostics: boolean;
   isPreloading: boolean;
   isBrowserReady: boolean;
+  gpuStarting: boolean;
   isSaving: boolean;
   history: ReviewHistorySummary[];
   isHistoryLoading: boolean;
   historyError: string | null;
   lineCount: number;
   setCode: (code: string) => void;
+  setShowDiagnostics: (open: boolean | ((current: boolean) => boolean)) => void;
   handleLanguageChange: (language: Language) => void;
+  handleProviderChange: (provider: InferenceProvider) => void;
   handleModelChange: (modelId: string) => void;
   handleParameterChange: (
     name: "temperature" | "maxTokens",
@@ -103,6 +130,7 @@ interface ReviewSessionValue {
   handleContinueReview: () => Promise<void>;
   handleCancelReview: () => void;
   handleSaveReview: () => Promise<SaveReviewOutcome>;
+  handleFindingSelect: (finding: ReviewFinding) => void;
   handleOpenHistory: (entry: ReviewHistorySummary) => Promise<boolean>;
   handleStarHistory: (id: string, starred: boolean) => Promise<void>;
   handleDeleteHistory: (id: string) => Promise<void>;
@@ -114,28 +142,44 @@ interface ReviewSessionValue {
 const ReviewSessionContext = createContext<ReviewSessionValue | null>(null);
 
 export function ReviewSessionProvider({ children }: { children: ReactNode }) {
+  const { t } = useLocale();
   const { user } = useSession();
   const { pushToast } = useToast();
   const abortRef = useRef<AbortController | null>(null);
   const ignoreAbortToastRef = useRef(false);
+  const translateRef = useRef(t);
+  translateRef.current = t;
 
-  const [language, setLanguage] = useState<Language>("polite");
+  const [language, setLanguage] = useState<Language>("python");
   const [code, setCodeState] = useState("");
   const [result, setResult] = useState<ReviewResult | null>(null);
+  const [selectedFinding, setSelectedFinding] = useState<string | null>(null);
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewErrorKind, setReviewErrorKind] = useState<ReviewErrorKind | null>(
     null,
   );
-  const provider: InferenceProvider = "browser";
-  const [modelId, setModelId] = useState("");
-  const [parameters, setParameters] = useState<ReviewParameters>(() =>
-    parametersForModel(REVIEW_CONFIG.model),
+  const [provider, setProvider] = useState<InferenceProvider>(
+    REVIEW_CONFIG.defaultProvider,
   );
+  const [modelId, setModelId] = useState("");
+  const [cloudProviders, setCloudProviders] = useState<InferenceProviderInfo[]>(
+    [],
+  );
+  const [parametersByProvider, setParametersByProvider] = useState<
+    Record<InferenceProvider, ReviewParameters>
+  >({
+    browser: browserParameters,
+    modal: browserParameters,
+    huggingface: browserParameters,
+    custom: browserParameters,
+  });
   const [checkpoint, setCheckpoint] = useState<BrowserReviewCheckpoint | null>(
     null,
   );
   const [modelProgress, setModelProgress] = useState<ModelProgress | null>(null);
+  const [modelLogs, setModelLogs] = useState<ReviewLogEntry[]>([]);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [isPreloading, setIsPreloading] = useState(false);
   const [isBrowserReady, setIsBrowserReady] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -144,6 +188,12 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const lineCount = code ? code.split("\n").length : 0;
+
+  const appendModelLog = useCallback((entry: ReviewLogEntry) => {
+    setModelLogs((current) =>
+      appendReviewLog(current, entry, APP_CONFIG.ui.modelLogLimit),
+    );
+  }, []);
 
   const loadHistory = useCallback(async () => {
     if (!user) {
@@ -161,18 +211,52 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsHistoryLoading(false);
     }
-  }, [user]);
+  }, [t, user]);
 
   useEffect(() => {
-    setModelId((current) => reviewModelForRuntimeId(current)?.id ?? "");
+    void listInferenceProviders()
+      .then((providers) => {
+        setCloudProviders(providers);
+        setParametersByProvider((current) => {
+          const next = { ...current };
+          for (const candidate of providers) {
+            next[candidate.id] = {
+              temperature: candidate.temperature,
+              maxTokens: Math.min(
+                REVIEW_CONFIG.generation.maxTokens,
+                candidate.maxTokens,
+              ),
+              maxFindings: REVIEW_CONFIG.limits.maxFindings,
+            };
+          }
+          return next;
+        });
+        setProvider((current) =>
+          current === "browser" ||
+          providers.some((candidate) => candidate.id === current)
+            ? current
+            : "browser",
+        );
+      })
+      .catch(() => setCloudProviders([]));
   }, []);
+
+  useEffect(() => {
+    if (provider === "browser") {
+      setModelId((current) => reviewModelForRuntimeId(current)?.id ?? "");
+      return;
+    }
+    const selected = cloudProviders.find((candidate) => candidate.id === provider);
+    if (!selected) return;
+    setModelId((current) => (current === selected.modelId ? current : ""));
+  }, [cloudProviders, provider]);
 
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
 
   useEffect(() => {
-    if (!reviewModelForRuntimeId(modelId)) {
+    if (provider !== "browser" || !reviewModelForRuntimeId(modelId)) {
       setIsPreloading(false);
       setIsBrowserReady(false);
       return;
@@ -181,10 +265,13 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     setIsPreloading(true);
     setIsBrowserReady(false);
+    const onLog = (entry: ReviewLogEntry) => {
+      if (!cancelled) appendModelLog(entry);
+    };
 
     void preloadBrowserModel((progress) => {
       if (!cancelled) setModelProgress(progress);
-    })
+    }, onLog)
       .then(() => {
         if (cancelled) return;
         setIsPreloading(false);
@@ -193,7 +280,7 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
           if (current?.streamedText || current?.result) return current;
           return {
             progress: 1,
-            text: current?.text || t("browser.ready"),
+            text: current?.text || translateRef.current("browser.ready"),
           };
         });
       })
@@ -205,21 +292,28 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
         setReviewError(
           error instanceof Error
             ? visibleReviewError(error.message)
-            : t("review.failed"),
+            : translateRef.current("review.failed"),
         );
       });
 
     return () => {
       cancelled = true;
     };
-  }, [modelId]);
+  }, [appendModelLog, modelId, provider]);
 
-  const canContinueReview = checkpointMatches(checkpoint, { code, language });
+  const canContinueReview =
+    provider === "browser" && checkpointMatches(checkpoint, { code, language });
   const interruptedOutput =
     canContinueReview && checkpoint ? checkpoint.streamedText : null;
+  const canOpenDiagnostics = modelLogs.length > 0;
+
+  useEffect(() => {
+    if (!canOpenDiagnostics) setShowDiagnostics(false);
+  }, [canOpenDiagnostics]);
 
   const resetOutput = () => {
     setResult(null);
+    setSelectedFinding(null);
     setReviewError(null);
     setReviewErrorKind(null);
     setCheckpoint(null);
@@ -233,8 +327,21 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
 
   const handleReview = async (options?: { resume?: boolean }) => {
     if (!code.trim() || isReviewing) return;
-    if (!reviewModelForRuntimeId(modelId)) {
+    const selectedCloud =
+      provider === "browser"
+        ? undefined
+        : cloudProviders.find((candidate) => candidate.id === provider);
+    if (
+      (provider === "browser" && !reviewModelForRuntimeId(modelId)) ||
+      (provider !== "browser" &&
+        (!selectedCloud || modelId !== selectedCloud.modelId))
+    ) {
       setReviewError(t("review.selectModel"));
+      setReviewErrorKind("generic");
+      return;
+    }
+    if (provider !== "browser" && !user) {
+      setReviewError(t("review.signInCloud"));
       setReviewErrorKind("generic");
       return;
     }
@@ -250,12 +357,19 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     if (!resumeFrom) {
       setResult(null);
       setCheckpoint(null);
+      setModelLogs([]);
     }
+    setSelectedFinding(null);
     setReviewError(null);
     setReviewErrorKind(null);
     setModelProgress({
       progress: 0,
-      text: resumeFrom ? t("browser.resuming") : t("browser.preparing"),
+      text:
+        provider === "browser"
+          ? resumeFrom
+            ? t("browser.resuming")
+            : t("browser.preparing")
+          : t("cloud.connecting"),
       streamedText: resumeFrom,
     });
     try {
@@ -264,15 +378,19 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
         if (progress.result) setResult(progress.result);
       };
       const nextResult = await runReview(
+        provider,
         {
           code,
           language,
-          parameters,
+          parameters: {
+            ...parametersByProvider[provider],
+            maxFindings: REVIEW_CONFIG.limits.maxFindings,
+          },
           resumeFrom,
           resumeElapsedMs: resumeFrom ? checkpoint?.elapsedMs : undefined,
         },
         onProgress,
-        undefined,
+        appendModelLog,
         controller.signal,
       );
       setCheckpoint(null);
@@ -280,7 +398,7 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       if (controller.signal.aborted) {
         if (!ignoreAbortToastRef.current) {
-          if (isReviewInterruptedError(error)) {
+          if (isReviewInterruptedError(error) && provider === "browser") {
             setCheckpoint({
               code,
               language,
@@ -352,6 +470,12 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const handleFindingSelect = (finding: ReviewFinding) => {
+    setSelectedFinding((current) =>
+      current === finding.id ? null : finding.id,
+    );
+  };
+
   const handleOpenHistory = async (entry: ReviewHistorySummary) => {
     try {
       const full = await getHistoryEntry(entry.id);
@@ -362,23 +486,38 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
       setLanguage(full.language);
       setCodeState(full.code);
       setResult(full.result);
-        setReviewError(null);
+      setSelectedFinding(null);
+      setReviewError(null);
       setReviewErrorKind(null);
       setHistoryError(null);
       setCheckpoint(null);
-      setModelId(
-        reviewModelForRuntimeId(inference?.modelId)?.id ??
-          REVIEW_CONFIG.defaultModelId,
-      );
-      if (
-        savedProvider &&
-        isInferenceProvider(savedProvider) &&
-        savedParameters
-      ) {
-        setParameters({
-          temperature: savedParameters.temperature,
-          maxTokens: savedParameters.maxTokens,
-        });
+      if (savedProvider && isInferenceProvider(savedProvider)) {
+        setProvider(savedProvider);
+        if (savedProvider === "browser") {
+          setModelId(
+            reviewModelForRuntimeId(inference?.modelId)?.id ??
+              REVIEW_CONFIG.defaultModelId,
+          );
+        } else {
+          const savedCloud = cloudProviders.find(
+            (candidate) => candidate.id === savedProvider,
+          );
+          setModelId(
+            savedCloud?.modelId ??
+              inference?.modelId ??
+              REVIEW_CONFIG.defaultModelId,
+          );
+        }
+        if (savedParameters) {
+          setParametersByProvider((current) => ({
+            ...current,
+            [savedProvider]: {
+              temperature: savedParameters.temperature,
+              maxTokens: savedParameters.maxTokens,
+              maxFindings: REVIEW_CONFIG.limits.maxFindings,
+            },
+          }));
+        }
       }
       return true;
     } catch (error) {
@@ -419,25 +558,73 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const selectedBrowserModel = reviewModelForRuntimeId(modelId);
+  const cloudProvider = cloudProviders.find(
+    (candidate) => candidate.id === provider,
+  );
+  const selectedBrowserModel =
+    provider === "browser" ? reviewModelForRuntimeId(modelId) : undefined;
+  const selectedCloudModel =
+    provider !== "browser" &&
+    cloudProvider &&
+    modelId === cloudProvider.modelId
+      ? cloudProvider
+      : undefined;
+  const parameters = parametersByProvider[provider];
   const parameterLimits = {
     maxTokens:
-      selectedBrowserModel?.limits.maxTokens ?? REVIEW_CONFIG.limits.maxTokens,
+      provider === "browser"
+        ? (selectedBrowserModel?.limits.maxTokens ??
+          REVIEW_CONFIG.limits.maxTokens)
+        : (cloudProvider?.maxTokens ?? parameters.maxTokens),
   };
-  const modelOptions = REVIEW_CONFIG.models.map((model) => ({
-    id: model.id,
-    label: model.label,
-  }));
+  const providerOptions: { id: InferenceProvider; label: string; hint?: string }[] = [
+    {
+      id: "browser",
+      label: t("provider.browser"),
+      hint: t("provider.recommended"),
+    },
+    ...cloudProviders.map((option) => {
+      const labelKey = inferenceProviderLabelKey(option.id);
+      return {
+        id: option.id,
+        label: labelKey ? t(labelKey) : option.label,
+      };
+    }),
+  ];
+  const providerLabel =
+    providerOptions.find((option) => option.id === provider)?.label ?? "";
+  const modelOptions =
+    provider === "browser"
+      ? REVIEW_CONFIG.models.map((model) => ({
+          id: model.id,
+          label: model.label,
+        }))
+      : cloudProvider
+        ? [
+            {
+              id: cloudProvider.modelId,
+              label:
+                reviewModelForRuntimeId(cloudProvider.modelId)?.label ??
+                cloudProvider.modelId,
+            },
+          ]
+        : [];
   const selectedModelOption = modelOptions.find(
     (option) => option.id === modelId,
   );
-  const showModelDetails = Boolean(selectedBrowserModel);
+  const showModelDetails = Boolean(selectedBrowserModel || selectedCloudModel);
   const tokenOptions = TOKEN_CHOICES.filter(
     (option) => option.value <= parameterLimits.maxTokens,
   );
   const selectedTokenOption =
     tokenOptions.find((option) => option.value === parameters.maxTokens) ??
     tokenOptions[tokenOptions.length - 1];
+  const gpuStarting =
+    reviewErrorKind === "startup" ||
+    (isReviewing &&
+      provider !== "browser" &&
+      (isCloudStartupMessage(modelProgress?.text ?? "") ||
+        modelLogs.some((entry) => isCloudStartupMessage(entry.message))));
 
   const handleParameterChange = (
     name: "temperature" | "maxTokens",
@@ -451,18 +638,44 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
             REVIEW_CONFIG.parameterMins.maxTokens,
             Math.min(Math.round(value), parameterLimits.maxTokens),
           );
-    setParameters((current) => ({
+    setParametersByProvider((current) => ({
       ...current,
-      [name]: normalized,
+      [provider]: {
+        ...current[provider],
+        [name]: normalized,
+        maxFindings: REVIEW_CONFIG.limits.maxFindings,
+      },
     }));
     resetOutput();
+  };
+
+  const handleProviderChange = (nextProvider: InferenceProvider) => {
+    setProvider(nextProvider);
+    setModelId("");
+    resetOutput();
+    setShowDiagnostics(false);
   };
 
   const handleModelChange = (nextModelId: string) => {
     setModelId(nextModelId);
     const nextBrowserModel = reviewModelForRuntimeId(nextModelId);
-    if (nextBrowserModel) {
-      setParameters(parametersForModel(nextBrowserModel));
+    if (provider === "browser" && nextBrowserModel) {
+      setParametersByProvider((current) => ({
+        ...current,
+        browser: parametersForModel(nextBrowserModel),
+      }));
+    } else if (cloudProvider && cloudProvider.modelId === nextModelId) {
+      setParametersByProvider((current) => ({
+        ...current,
+        [provider]: {
+          temperature: cloudProvider.temperature,
+          maxTokens: Math.min(
+            REVIEW_CONFIG.generation.maxTokens,
+            cloudProvider.maxTokens,
+          ),
+          maxFindings: REVIEW_CONFIG.limits.maxFindings,
+        },
+      }));
     }
     resetOutput();
   };
@@ -485,21 +698,30 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     language,
     code,
     result,
+    selectedFinding,
     isReviewing,
     reviewError,
     reviewErrorKind,
     provider,
     modelId,
+    cloudProviders,
     parameters,
+    providerOptions,
+    providerLabel,
     modelOptions,
     selectedModelOption,
     selectedBrowserModel,
+    selectedCloudModel,
     showModelDetails,
     tokenOptions,
     selectedTokenOption,
     modelProgress,
+    modelLogs,
+    showDiagnostics,
+    canOpenDiagnostics,
     isPreloading,
     isBrowserReady,
+    gpuStarting,
     isSaving,
     history,
     isHistoryLoading,
@@ -508,13 +730,16 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
     canContinueReview,
     interruptedOutput,
     setCode,
+    setShowDiagnostics,
     handleLanguageChange,
+    handleProviderChange,
     handleModelChange,
     handleParameterChange,
     handleReview,
     handleContinueReview,
     handleCancelReview,
     handleSaveReview,
+    handleFindingSelect,
     handleOpenHistory,
     handleStarHistory,
     handleDeleteHistory,
@@ -527,8 +752,10 @@ export function ReviewSessionProvider({ children }: { children: ReactNode }) {
       }
       setCodeState("");
       resetOutput();
+      setModelLogs([]);
       setModelProgress(null);
       setIsReviewing(false);
+      setShowDiagnostics(false);
     },
   };
 

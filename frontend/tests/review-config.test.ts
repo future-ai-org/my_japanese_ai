@@ -15,6 +15,7 @@ describe("REVIEW_CONFIG", () => {
       "../src/config/review"
     );
 
+    expect(REVIEW_CONFIG.defaultProvider).toBe("browser");
     expect(REVIEW_CONFIG.defaultModelId).toBe(REVIEW_CONFIG.model.id);
     expect(REVIEW_CONFIG.models).toHaveLength(1);
     expect(REVIEW_CONFIG.models[0]).toBe(REVIEW_CONFIG.model);
@@ -24,6 +25,7 @@ describe("REVIEW_CONFIG", () => {
     expect(REVIEW_CONFIG.model.limits).toEqual(REVIEW_CONFIG.limits);
     expect(REVIEW_CONFIG.model.generation).toEqual(REVIEW_CONFIG.generation);
     expect(REVIEW_CONFIG.limits.maxCodeCharacters).toBe(4000);
+    expect(REVIEW_CONFIG.limits.maxFindings).toBe(3);
     expect(REVIEW_CONFIG.limits.maxTokens).toBe(1024);
     expect(REVIEW_CONFIG.generation).toEqual({
       temperature: 0.2,
@@ -36,6 +38,7 @@ describe("REVIEW_CONFIG", () => {
     expect(REVIEW_CONFIG.tokenChoices.map((choice) => choice.value)).toEqual([
       256, 384, 512, 768, 1024,
     ]);
+    expect(REVIEW_CONFIG.detailedMinTokens).toBe(384);
     expect(REVIEW_CONFIG.webgpu).toEqual({
       powerPreference: "high-performance",
       lowResourceRequired: true,
@@ -43,6 +46,7 @@ describe("REVIEW_CONFIG", () => {
     expect(REVIEW_CONFIG.artifacts.configFilename).toBe("mlc-chat-config.json");
     expect(REVIEW_CONFIG.phases).toEqual({
       browserPrefillSeconds: 1,
+      cloudWaitSeconds: 3,
     });
     expect(WEBLLM_APP_CONFIG.useIndexedDBCache).toBe(true);
     expect(WEBLLM_APP_CONFIG.model_list).toHaveLength(1);
@@ -58,7 +62,8 @@ describe("REVIEW_CONFIG", () => {
     });
   });
 
-  it("reads cache backend and numeric overrides from env", async () => {
+  it("reads provider, cache backend, and numeric overrides from env", async () => {
+    vi.stubEnv("VITE_INFERENCE_DEFAULT_PROVIDER", "huggingface");
     vi.stubEnv("VITE_WEBLLM_CACHE_BACKEND", "cache");
     vi.stubEnv("VITE_WEBLLM_DOWNLOAD_CONCURRENCY", "12");
     vi.stubEnv("VITE_WEBLLM_MODEL_LABEL", "Custom Swallow");
@@ -74,6 +79,7 @@ describe("REVIEW_CONFIG", () => {
     vi.stubEnv("VITE_REVIEW_TEMPERATURE", "0.5");
     vi.stubEnv("VITE_REVIEW_MAX_TOKENS", "256");
     vi.stubEnv("VITE_REVIEW_MAX_TOKENS_LIMIT", "384");
+    vi.stubEnv("VITE_REVIEW_MAX_FINDINGS", "0");
     vi.stubEnv("VITE_REVIEW_TOKEN_SHORT", "128");
     vi.stubEnv("VITE_REVIEW_TEMPERATURE_MAX", "0.8");
     vi.stubEnv("VITE_BROWSER_PREFILL_PHASE_SECONDS", "2");
@@ -83,6 +89,7 @@ describe("REVIEW_CONFIG", () => {
       "../src/config/review"
     );
 
+    expect(REVIEW_CONFIG.defaultProvider).toBe("huggingface");
     expect(REVIEW_CONFIG.model).toMatchObject({
       label: "Custom Swallow",
       description: "Hosted privately.",
@@ -100,6 +107,7 @@ describe("REVIEW_CONFIG", () => {
     });
     expect(REVIEW_CONFIG.limits).toEqual({
       maxCodeCharacters: 2000,
+      maxFindings: 0,
       maxTokens: 384,
     });
     expect(REVIEW_CONFIG.storage.cacheBackend).toBe("cache");
@@ -115,12 +123,13 @@ describe("REVIEW_CONFIG", () => {
     });
   });
 
-  it("reads WebGPU and artifact overrides from env", async () => {
+  it("reads WebGPU, artifact, and detailed-token overrides from env", async () => {
     vi.stubEnv("VITE_WEBLLM_POWER_PREFERENCE", "low-power");
     vi.stubEnv("VITE_WEBLLM_LOW_RESOURCE_REQUIRED", "false");
     vi.stubEnv("VITE_WEBLLM_HF_REVISION", "refs/pr/1");
     vi.stubEnv("VITE_WEBLLM_CONFIG_FILENAME", "chat-config.json");
     vi.stubEnv("VITE_WEBLLM_TOKENIZER_FILES", "tokenizer.json");
+    vi.stubEnv("VITE_REVIEW_DETAILED_MIN_TOKENS", "400");
     vi.stubEnv("VITE_REVIEW_TOKEN_MEDIUM", "350");
     vi.resetModules();
 
@@ -136,6 +145,7 @@ describe("REVIEW_CONFIG", () => {
       configFilename: "chat-config.json",
       tokenizerFiles: ["tokenizer.json"],
     });
+    expect(REVIEW_CONFIG.detailedMinTokens).toBe(400);
     expect(REVIEW_CONFIG.tokenChoices[1]?.value).toBe(350);
     expect(WEBLLM_APP_CONFIG.model_list[0]?.low_resource_required).toBe(false);
   });
@@ -165,11 +175,13 @@ describe("REVIEW_CONFIG", () => {
   it("ignores invalid numeric environment values", async () => {
     vi.stubEnv("VITE_REVIEW_MAX_TOKENS", "nope");
     vi.stubEnv("VITE_WEBLLM_MODEL_VRAM_MB", "0");
+    vi.stubEnv("VITE_INFERENCE_DEFAULT_PROVIDER", "browser-local");
     vi.resetModules();
 
     const { REVIEW_CONFIG } = await import("../src/config/review");
     expect(REVIEW_CONFIG.generation.maxTokens).toBe(512);
     expect(REVIEW_CONFIG.model.vramRequiredMB).toBe(1889);
+    expect(REVIEW_CONFIG.defaultProvider).toBe("browser");
   });
 
   it("caps temperature at 1 even when env asks for more", async () => {
@@ -185,12 +197,14 @@ describe("REVIEW_CONFIG", () => {
   it("resolves catalog models and applies their generation defaults", async () => {
     const {
       REVIEW_CONFIG,
+      getReviewModel,
       parametersForModel,
       reviewModelForRuntimeId,
     } = await import("../src/config/review");
 
+    expect(getReviewModel(undefined).id).toBe(REVIEW_CONFIG.defaultModelId);
+    expect(getReviewModel("missing-model").id).toBe(REVIEW_CONFIG.defaultModelId);
     expect(reviewModelForRuntimeId("missing-model")).toBeUndefined();
-    expect(reviewModelForRuntimeId(undefined)).toBeUndefined();
     expect(reviewModelForRuntimeId(REVIEW_CONFIG.model.id)?.id).toBe(
       REVIEW_CONFIG.model.id,
     );
@@ -203,6 +217,7 @@ describe("REVIEW_CONFIG", () => {
     expect(parametersForModel(REVIEW_CONFIG.model)).toEqual({
       temperature: REVIEW_CONFIG.generation.temperature,
       maxTokens: REVIEW_CONFIG.generation.maxTokens,
+      maxFindings: REVIEW_CONFIG.limits.maxFindings,
     });
   });
 });

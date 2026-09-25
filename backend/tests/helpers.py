@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from typing import Any
 
+MODAL_URL = "https://example.modal.run/v1/chat/completions"
+
 
 def current_user(user: dict[str, Any] | None = None):
     payload = {"id": "user-id"}
@@ -48,6 +50,9 @@ class FakeConnection:
 
     async def __aexit__(self, *_args):
         return None
+
+    def transaction(self):
+        return self
 
     async def execute(self, query, parameters=()):
         self.calls.append((query, parameters))

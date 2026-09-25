@@ -1,31 +1,106 @@
 import type {
   Language,
+  ReviewFinding,
   ReviewInferenceTrace,
   ReviewResult,
+  Severity,
 } from "../types/review.js";
+import { APP_CONFIG, clampScore } from "../config/app";
 import { numberFromEnv } from "../config/env";
 import reviewSystemPrompt from "../../../backend/app/prompts/review_system.txt?raw";
 import reviewUserPrompt from "../../../backend/app/prompts/review_user.txt?raw";
 import reviewUserPromptDetailed from "../../../backend/app/prompts/review_user_detailed.txt?raw";
 
-// Medium and standard token budgets ask for a longer English lesson.
-// Short stays on the compact template so translation + lesson still fit.
+// Medium and standard token budgets ask for 3-4 sentence metric writeups.
+// Short stays on the compact template so all three metrics still fit.
 export const REVIEW_DETAILED_MIN_TOKENS = numberFromEnv(
   import.meta.env.VITE_REVIEW_DETAILED_MIN_TOKENS,
   numberFromEnv(import.meta.env.VITE_REVIEW_TOKEN_MEDIUM, 384, 1),
   1,
 );
 
-// Compact grammar for WebLLM: no minItems/minimum keywords that older
-// xgrammar builds warn on.
+const REVIEW_METRIC_OBJECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    score: { type: "integer" },
+    description: { type: "string" },
+    snippet: { type: "string" },
+  },
+  required: ["score", "description"],
+} as const;
+
+const WEBLLM_METRIC_OBJECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    score: { type: "integer" },
+    description: { type: "string" },
+  },
+  required: ["score", "description"],
+} as const;
+
+const REVIEW_FINDING_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    severity: {
+      type: "string",
+      enum: ["critical", "warning", "suggestion"],
+    },
+    title: { type: "string" },
+    description: { type: "string" },
+    line: { type: "integer" },
+    suggestion: { type: "string" },
+  },
+  required: ["severity", "title", "description", "line"],
+} as const;
+
+function namedMetricsSchema<T extends Record<string, unknown>>(item: T) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      Correctness: item,
+      Security: item,
+      Maintainability: item,
+    },
+    required: ["Correctness", "Security", "Maintainability"],
+  } as const;
+}
+
+export const REVIEW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    score: { type: "integer" },
+    metrics: namedMetricsSchema(REVIEW_METRIC_OBJECT_SCHEMA),
+    summary: { type: "string" },
+    rationale: { type: "string" },
+    findings: {
+      type: "array",
+      items: REVIEW_FINDING_SCHEMA,
+    },
+  },
+  required: ["score", "metrics", "summary", "rationale", "findings"],
+} as const;
+
+// Compact grammar for WebLLM: required named metrics, no snippets, no
+// minItems/minimum keywords that older xgrammar builds warn on.
 export const WEBLLM_REVIEW_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    translation: { type: "string" },
-    lesson: { type: "string" },
+    score: { type: "integer" },
+    metrics: namedMetricsSchema(WEBLLM_METRIC_OBJECT_SCHEMA),
+    summary: { type: "string" },
+    rationale: { type: "string" },
+    findings: {
+      type: "array",
+      items: REVIEW_FINDING_SCHEMA,
+    },
   },
-  required: ["translation", "lesson"],
+  required: ["score", "metrics", "summary", "rationale", "findings"],
 } as const;
 
 export const WEBLLM_REVIEW_SCHEMA_JSON = JSON.stringify(WEBLLM_REVIEW_SCHEMA);
@@ -45,6 +120,23 @@ export function createReviewPrompt(
       : REVIEW_USER_PROMPT_TEMPLATE;
   return `${template.replaceAll("{language}", language)}\n\n${code}`;
 }
+
+const SEVERITY_ALIASES: Record<string, Severity> = {
+  critical: "critical",
+  error: "critical",
+  fatal: "critical",
+  high: "critical",
+  warning: "warning",
+  warn: "warning",
+  medium: "warning",
+  moderate: "warning",
+  suggestion: "suggestion",
+  info: "suggestion",
+  information: "suggestion",
+  note: "suggestion",
+  low: "suggestion",
+  nit: "suggestion",
+};
 
 function foldKeys(value: Record<string, unknown>): Record<string, unknown> {
   const folded: Record<string, unknown> = {};
@@ -69,72 +161,281 @@ function coerceText(value: unknown): string {
   return number === undefined ? "" : String(number);
 }
 
-/** Strip HTML/markdown the model sometimes leaks into teaching strings. */
-export function stripTeachingMarkup(text: string): string {
-  let result = text.replace(/<br\s*\/?>/gi, " ");
-  result = result.replace(/<\/?[a-zA-Z][a-zA-Z0-9]*(?:\s[^>]*)?>/g, "");
-  // Truncated tag at the end only, e.g. "<span style=".
-  result = result.replace(/<\/?[a-zA-Z][a-zA-Z0-9]*\b[^>\n]*$/g, "");
-  result = result
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'");
-  result = result.replace(/\*\*([^*]+)\*\*/g, "$1");
-  result = result.replace(/__([^_]+)__/g, "$1");
-  result = result.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1$2");
-  // Bullet markers at line starts or after breaks the model inserted as <br>*
-  result = result.replace(/(^|\s)\*[ \t]+(?=\S)/g, "$1");
-  result = result.replace(/(^|\s)\*(?=\s|$)/g, "$1");
-  result = result.replace(/\*\*/g, "");
-  // Outline labels the small model sometimes echoes from the prompt.
-  result = result.replace(
-    /(^|\n|[.!?]\s+)(?:register|sentence structure|key vocabulary words?)\s*:\s*/gi,
-    "$1",
+function readSeverity(value: unknown): Severity | undefined {
+  if (typeof value !== "string") return undefined;
+  return SEVERITY_ALIASES[value.trim().toLowerCase()];
+}
+
+function clampLine(line: number, lineCount: number): number {
+  return Math.max(1, Math.min(Math.round(line), Math.max(1, lineCount)));
+}
+
+export const CANONICAL_METRICS = [
+  "Correctness",
+  "Security",
+  "Maintainability",
+] as const;
+
+const KNOWN_METRIC_LABELS = new Set(
+  [...CANONICAL_METRICS, "Reliability", "Performance"].map((label) =>
+    label.toLowerCase(),
+  ),
+);
+
+const SKIP_METRIC_KEYS = new Set([
+  "score",
+  "summary",
+  "rationale",
+  "reason",
+  "metrics",
+  "findings",
+  "issues",
+]);
+
+export function canonicalMetricLabel(label: string): string {
+  const stripped = label.trim();
+  const match = CANONICAL_METRICS.find(
+    (canonical) => canonical.toLowerCase() === stripped.toLowerCase(),
   );
-  // Keep ||| paragraph markers and blank-line breaks; collapse other whitespace.
-  result = result.replace(/\r\n?/g, "\n");
-  result = result.replace(/[^\S\n]+/g, " ");
-  result = result.replace(/ *\n */g, "\n");
-  result = result.replace(/([^\n])\n([^\n])/g, "$1 $2");
-  result = result.replace(/\n{3,}/g, "\n\n");
-  result = result.replace(/\s*\|\|\|\s*/g, "|||");
-  return result.replace(/^\n+|\n+$/g, "").trim();
+  return match ?? stripped;
 }
 
-/** Split a lesson into paragraphs on ||| markers or blank lines. */
-export function splitLessonParagraphs(lesson: string): string[] {
-  const normalized = lesson.includes("|||")
-    ? lesson.split("|||")
-    : lesson.split(/\n\n+/);
-  return normalized.map((paragraph) => paragraph.trim()).filter(Boolean);
+function metricPayload(
+  label: unknown,
+  score: unknown,
+  description?: unknown,
+  snippet?: unknown,
+) {
+  if (typeof label !== "string" || !label.trim()) return undefined;
+  const number = coerceNumber(score);
+  if (number === undefined) return undefined;
+  return {
+    label: canonicalMetricLabel(label),
+    score: number,
+    description:
+      typeof description === "string" && description.trim()
+        ? description.trim()
+        : undefined,
+    snippet: typeof snippet === "string" ? snippet : undefined,
+  };
 }
 
-function coerceTeachingText(value: unknown): string {
-  return stripTeachingMarkup(coerceText(value));
+function metricFromNamedEntry(key: string, value: unknown) {
+  if (SKIP_METRIC_KEYS.has(key.toLowerCase())) return undefined;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const folded = foldKeys(value as Record<string, unknown>);
+    return (
+      metricPayload(
+        typeof folded.label === "string"
+          ? folded.label
+          : typeof folded.name === "string"
+            ? folded.name
+            : key,
+        folded.score,
+        folded.description,
+        folded.snippet,
+      ) ?? metricPayload(key, folded.score, folded.description, folded.snippet)
+    );
+  }
+  if (typeof value === "string" && coerceNumber(value) === undefined) {
+    return undefined;
+  }
+  return metricPayload(key, value);
+}
+
+function orderMetrics(
+  metrics: Array<{
+    label: string;
+    score: number;
+    description?: string;
+    snippet?: string;
+  }>,
+) {
+  const merged = new Map<
+    string,
+    { label: string; score: number; description?: string; snippet?: string }
+  >();
+  const extras: Array<{
+    label: string;
+    score: number;
+    description?: string;
+    snippet?: string;
+  }> = [];
+  for (const metric of metrics) {
+    const label = canonicalMetricLabel(metric.label);
+    const key = label.toLowerCase();
+    const current = { ...metric, label };
+    if (KNOWN_METRIC_LABELS.has(key)) {
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, current);
+      } else {
+        if (!existing.description && current.description) {
+          existing.description = current.description;
+        }
+        if (!existing.snippet && current.snippet) {
+          existing.snippet = current.snippet;
+        }
+      }
+    } else {
+      extras.push(current);
+    }
+  }
+  const ordered = CANONICAL_METRICS.flatMap((label) => {
+    const item = merged.get(label.toLowerCase());
+    return item ? [item] : [];
+  });
+  for (const item of merged.values()) {
+    if (!ordered.includes(item)) ordered.push(item);
+  }
+  ordered.push(...extras);
+  return ordered.slice(0, APP_CONFIG.score.maxMetrics);
+}
+
+export function collectMetrics(value: unknown) {
+  const metrics: Array<{
+    label: string;
+    score: number;
+    description?: string;
+    snippet?: string;
+  }> = [];
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const metric = readReviewMetric(item);
+      if (metric) {
+        metrics.push(metric);
+        continue;
+      }
+      if (!item || typeof item !== "object") continue;
+      for (const [key, nested] of Object.entries(item as Record<string, unknown>)) {
+        const extra = metricFromNamedEntry(key, nested);
+        if (extra) metrics.push(extra);
+      }
+    }
+    return orderMetrics(metrics);
+  }
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const known = Object.keys(record).filter((key) =>
+    KNOWN_METRIC_LABELS.has(canonicalMetricLabel(key).toLowerCase()),
+  );
+  const single = readReviewMetric(record);
+  if (known.length >= 2 || (!single && known.length)) {
+    for (const [key, item] of Object.entries(record)) {
+      const extra = metricFromNamedEntry(key, item);
+      if (extra) metrics.push(extra);
+    }
+    return orderMetrics(metrics);
+  }
+  return single ? [single] : [];
+}
+
+export function readReviewMetric(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const item = foldKeys(value as Record<string, unknown>);
+  const fromFields = metricPayload(
+    item.label ?? item.name,
+    item.score,
+    item.description,
+    item.snippet,
+  );
+  if (fromFields) {
+    return {
+      ...fromFields,
+      score: clampScore(fromFields.score),
+    };
+  }
+  const named: Array<{
+    label: string;
+    score: number;
+    description?: string;
+    snippet?: string;
+  }> = [];
+  const sharedDescription =
+    typeof item.description === "string" ? item.description : undefined;
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    const extra = metricFromNamedEntry(key, nested);
+    if (!extra) continue;
+    if (sharedDescription && !extra.description) {
+      extra.description = sharedDescription;
+    }
+    named.push({ ...extra, score: clampScore(extra.score) });
+  }
+  return named.length === 1 ? named[0] : undefined;
+}
+
+export function readReviewFinding(
+  value: unknown,
+  index: number,
+  options: { lineCount: number; createId: () => string },
+): ReviewFinding | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = foldKeys(value as Record<string, unknown>);
+  const severity = readSeverity(item.severity);
+  const title = item.title ?? item.name;
+  const description = item.description ?? item.message;
+  const line = coerceNumber(item.line ?? item.lineno) ?? 1;
+  if (
+    !severity ||
+    typeof title !== "string" ||
+    !title ||
+    typeof description !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    id: `review-${index}-${options.createId()}`,
+    severity,
+    title,
+    description,
+    line: clampLine(line, options.lineCount),
+    suggestion:
+      typeof item.suggestion === "string" && item.suggestion
+        ? item.suggestion
+        : undefined,
+  };
 }
 
 export function coerceReviewPayload(
   value: unknown,
 ): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const folded = foldKeys(value as Record<string, unknown>);
-  const hasTranslation = "translation" in folded || "summary" in folded;
-  const hasLesson = "lesson" in folded || "rationale" in folded || "reason" in folded;
-  if (!hasTranslation && !hasLesson) return undefined;
+  const record = value as Record<string, unknown>;
+  const folded = foldKeys(record);
+  const collected = [
+    ...collectMetrics(folded.metrics),
+    ...CANONICAL_METRICS.flatMap((label) => {
+      const extra = metricFromNamedEntry(label, record[label] ?? folded[label.toLowerCase()]);
+      return extra ? [{ ...extra, score: clampScore(extra.score) }] : [];
+    }),
+  ];
+  const metrics = orderMetrics(collected);
+  const parsedScore = coerceNumber(folded.score);
+  const score =
+    parsedScore ??
+    (!("score" in folded) && metrics.length
+      ? metrics.reduce((sum, metric) => sum + metric.score, 0) / metrics.length
+      : undefined);
+  if (score === undefined) return undefined;
   return {
-    translation: coerceTeachingText(folded.translation ?? folded.summary),
-    lesson: coerceTeachingText(folded.lesson ?? folded.rationale ?? folded.reason),
+    score,
+    summary: coerceText(folded.summary),
+    rationale: coerceText(folded.rationale ?? folded.reason),
+    metrics,
+    findings: Array.isArray(folded.findings ?? folded.issues)
+      ? (folded.findings ?? folded.issues)
+      : [],
   };
 }
 
 export function normalizeReviewResult(
   value: unknown,
   options: {
+    lineCount: number;
     durationMs: number;
+    maxFindings: number;
     inference: ReviewInferenceTrace;
+    createId: () => string;
   },
 ): ReviewResult {
   const candidate = coerceReviewPayload(value);
@@ -146,9 +447,26 @@ export function normalizeReviewResult(
     );
   }
 
+  const metrics = (candidate.metrics as unknown[])
+    .flatMap((metric) => {
+      const item = readReviewMetric(metric);
+      return item ? [item] : [];
+    })
+    .slice(0, APP_CONFIG.score.maxMetrics);
+
+  const findings = (candidate.findings as unknown[])
+    .flatMap((finding, index) => {
+      const item = readReviewFinding(finding, index, options);
+      return item ? [item] : [];
+    })
+    .slice(0, options.maxFindings);
+
   return {
-    translation: candidate.translation as string,
-    lesson: candidate.lesson as string,
+    score: clampScore(candidate.score as number),
+    summary: candidate.summary as string,
+    rationale: candidate.rationale as string,
+    metrics,
+    findings,
     durationMs: options.durationMs,
     inference: options.inference,
   };

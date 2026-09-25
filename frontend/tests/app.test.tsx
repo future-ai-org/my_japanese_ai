@@ -7,9 +7,10 @@ import { REVIEW_CONFIG } from "../src/config/review";
 import { EXAMPLES } from "../src/data/examples";
 import { ReviewInterruptedError } from "../src/review/resume";
 import type { Language } from "../src/types/review";
-import { historyEntry, historySummary, reviewResult, user } from "./fixtures";
+import { historyEntry, historySummary, huggingfaceProvider, modalProvider, reviewResult, user } from "./fixtures";
 
 const {
+  defaultProvider,
   getSession,
   logout,
   login,
@@ -20,9 +21,11 @@ const {
   saveHistory,
   deleteHistory,
   starHistory,
+  listInferenceProviders,
   runReview,
   preloadBrowserModel,
 } = vi.hoisted(() => ({
+  defaultProvider: { current: "browser" as "browser" | "modal" | "huggingface" | "custom" },
   getSession: vi.fn(),
   logout: vi.fn(),
   login: vi.fn(),
@@ -33,9 +36,23 @@ const {
   saveHistory: vi.fn(),
   deleteHistory: vi.fn(),
   starHistory: vi.fn(),
+  listInferenceProviders: vi.fn(),
   runReview: vi.fn(),
   preloadBrowserModel: vi.fn(),
 }));
+
+vi.mock("../src/config/review", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config/review")>();
+  return {
+    ...actual,
+    REVIEW_CONFIG: {
+      ...actual.REVIEW_CONFIG,
+      get defaultProvider() {
+        return defaultProvider.current;
+      },
+    },
+  };
+});
 
 vi.mock("../src/services/auth", () => ({
   getSession,
@@ -68,14 +85,20 @@ vi.mock("../src/services/history", () => ({
     codePreview: entry.code.split("\n")[0] ?? "",
     lineCount: entry.code ? entry.code.split("\n").length : 0,
     characterCount: entry.code.length,
-    translation: entry.result.translation,
+    score: entry.result.score,
+    summary: entry.result.summary,
     starred: Boolean(entry.starred),
     provider: entry.result.inference?.provider,
     modelId: entry.result.inference?.modelId,
     temperature: entry.result.inference?.generationConfig.temperature,
     maxTokens: entry.result.inference?.generationConfig.maxTokens,
+    maxFindings: entry.result.inference?.generationConfig.maxFindings,
     durationMs: entry.result.durationMs,
   }),
+}));
+
+vi.mock("../src/services/reviewCloud", () => ({
+  listInferenceProviders,
 }));
 
 vi.mock("../src/services/reviewRunner", () => ({
@@ -84,6 +107,26 @@ vi.mock("../src/services/reviewRunner", () => ({
 
 vi.mock("../src/services/review", () => ({
   preloadBrowserModel,
+}));
+
+vi.mock("@codemirror/lang-cpp", () => ({
+  cpp: () => [],
+}));
+
+vi.mock("@codemirror/lang-go", () => ({
+  go: () => [],
+}));
+
+vi.mock("@codemirror/lang-javascript", () => ({
+  javascript: () => [],
+}));
+
+vi.mock("@codemirror/lang-python", () => ({
+  python: () => [],
+}));
+
+vi.mock("@codemirror/lang-rust", () => ({
+  rust: () => [],
 }));
 
 vi.mock("@codemirror/view", () => ({
@@ -118,7 +161,7 @@ vi.mock("@uiw/react-codemirror", () => ({
     });
     return (
       <textarea
-        aria-label="English to translate"
+        aria-label="Code to review"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
@@ -138,15 +181,21 @@ async function renderApp(path = "/") {
 }
 
 function chooseTinyModel() {
-  fireEvent.change(screen.getByLabelText("Teaching model"), {
+  fireEvent.change(screen.getByLabelText("Review model"), {
     target: { value: REVIEW_CONFIG.defaultModelId },
   });
 }
 
-function loadExample(language: Language = "polite") {
-  const select = screen.getByLabelText("Load an example register") as HTMLSelectElement;
+function chooseCloudModel(modelId = modalProvider.modelId) {
+  fireEvent.change(screen.getByLabelText("Review model"), {
+    target: { value: modelId },
+  });
+}
+
+function loadExample(language: Language = "python") {
+  const select = screen.getByLabelText("Load an example") as HTMLSelectElement;
   if (select.value === language) {
-    const other = language === "polite" ? "casual" : "polite";
+    const other = language === "python" ? "go" : "python";
     fireEvent.change(select, { target: { value: other } });
   }
   fireEvent.change(select, { target: { value: language } });
@@ -155,6 +204,7 @@ function loadExample(language: Language = "polite") {
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    defaultProvider.current = "browser";
     getSession.mockResolvedValue(null);
     logout.mockResolvedValue(undefined);
     login.mockResolvedValue(user);
@@ -165,6 +215,7 @@ describe("App", () => {
     saveHistory.mockResolvedValue(historyEntry);
     deleteHistory.mockResolvedValue(undefined);
     starHistory.mockResolvedValue({ ...historySummary, starred: true });
+    listInferenceProviders.mockResolvedValue([]);
     runReview.mockResolvedValue(reviewResult);
     preloadBrowserModel.mockResolvedValue({});
     window.history.replaceState(null, "", "/");
@@ -181,7 +232,7 @@ describe("App", () => {
 
     await view.click(screen.getByRole("link", { name: "Go to home" }));
     expect(
-      screen.getByRole("heading", { name: /my japanese AI/ }),
+      screen.getByRole("heading", { name: /Review your code/ }),
     ).toBeInTheDocument();
 
     await view.click(screen.getByRole("link", { name: "Sign in" }));
@@ -195,76 +246,143 @@ describe("App", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("links TAID to the documentation page", async () => {
+    await renderApp();
+    const taid = screen.getByRole("link", { name: "TAID" });
+    expect(taid).toHaveAttribute("href", "/docs/taid");
+  });
+
   it("shows the idle results prompt before any code is reviewed", async () => {
     await renderApp();
     const heading = screen.getByRole("heading", { name: "Ready when you are" });
     expect(heading.closest(".empty-state")).toBeTruthy();
     expect(
       screen.getByText(
-        "Paste English, upload a text file, or load an example to start a lesson.",
+        "Upload a file, paste code, or load an example to run a review.",
       ),
     ).toBeInTheDocument();
   });
 
-  it("runs a local example review", async () => {
+  it("runs a local example review and toggles diagnostics", async () => {
     const view = await renderApp();
     chooseTinyModel();
     expect(await screen.findByRole("heading", { name: "Local model ready." })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View logs" })).toBeDisabled();
 
     loadExample();
-    expect(screen.getByLabelText("English to translate")).toHaveValue(EXAMPLES.polite);
+    expect(screen.getByLabelText("Code to review")).toHaveValue(EXAMPLES.python);
+    expect(screen.getByRole("button", { name: "View logs" })).toBeDisabled();
 
-    runReview.mockImplementation(async () => reviewResult);
+    runReview.mockImplementation(async (_provider, _request, onProgress, onLog) => {
+      onProgress?.({ progress: 0.2, text: "Downloading weights" });
+      onLog?.({
+        id: "log-1",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        level: "info",
+        stage: "review",
+        message: "Starting a local code review.",
+      });
+      return reviewResult;
+    });
 
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Japanese translation" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "How to translate it" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Phrase notes" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save lesson" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "View logs" })).not.toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Good foundation" })).toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Null crash/ }));
+    const saveReview = screen.getByRole("button", { name: "Save review" });
+    const diagnosticsButton = screen.getByRole("button", { name: "View logs" });
+    expect(saveReview.parentElement).toBe(diagnosticsButton.parentElement);
+    expect(diagnosticsButton).toBeEnabled();
     expect(runReview).toHaveBeenCalledWith(
-      expect.objectContaining({ language: "polite", code: EXAMPLES.polite }),
+      "browser",
+      expect.objectContaining({ language: "python", code: EXAMPLES.python }),
       expect.any(Function),
-      undefined,
+      expect.any(Function),
       expect.any(AbortSignal),
+    );
+
+    await view.click(screen.getByRole("button", { name: "View logs" }));
+    expect(screen.getByText("Starting a local code review.")).toBeInTheDocument();
+    const diagnostics = screen.getByLabelText("Local model logs");
+    expect(within(diagnostics).queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
+    expect(within(diagnostics).getByRole("button", { name: "Copy logs" })).toBeInTheDocument();
+
+    await view.click(screen.getByRole("button", { name: "Close logs" }));
+    expect(
+      screen.queryByText("Run a review to collect model logs."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View logs" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
     );
   });
 
   it("strips HTTP details from review errors and ignores empty submissions", async () => {
     const view = await renderApp();
-    expect(screen.getByRole("button", { name: /Run lesson/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Run review/ })).toBeDisabled();
 
-    await view.type(screen.getByLabelText("English to translate"), "print(1)");
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.type(screen.getByLabelText("Code to review"), "print(1)");
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     expect(
-      screen.getByText("Select a model before running a lesson."),
+      screen.getByText("Select a model before running a review."),
     ).toBeInTheDocument();
     chooseTinyModel();
     runReview.mockRejectedValue(
       new Error("Provider down (HTTP 503 Service Unavailable)"),
     );
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    expect(await screen.findByText("Lesson could not run")).toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(await screen.findByText("GPU is still starting")).toBeInTheDocument();
     expect(screen.getByText("Provider down")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Run lesson/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry review" })).toBeInTheDocument();
 
     runReview.mockRejectedValue(new Error("  (HTTP 503 Service Unavailable)"));
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: "Retry review" }));
     expect(await screen.findByText(/HTTP 503 Service Unavailable/)).toBeInTheDocument();
-    expect(screen.getByText("Lesson could not run")).toBeInTheDocument();
+    expect(screen.getByText("GPU is still starting")).toBeInTheDocument();
   });
 
+  it("requires sign-in before a cloud review", async () => {
+    listInferenceProviders.mockResolvedValue([modalProvider]);
+    const view = await renderApp();
+
+    await view.selectOptions(
+      screen.getByLabelText("Inference provider"),
+      "modal",
+    );
+    expect(screen.getByLabelText("Review model")).toHaveValue("");
+    expect(
+      screen.queryByText(/Sign in before running a cloud review/),
+    ).not.toBeInTheDocument();
+
+    loadExample();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(
+      screen.getByText("Select a model before running a review."),
+    ).toBeInTheDocument();
+
+    chooseCloudModel();
+    expect(screen.getByText(/Sign in before running a cloud review/)).toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(screen.getByText("Sign in to use cloud inference.")).toBeInTheDocument();
+    expect(runReview).not.toHaveBeenCalled();
+  });
 
   it("shows local model progress while a review is in flight", async () => {
     let finish: ((result: typeof reviewResult) => void) | undefined;
     runReview.mockImplementation(
-      (_request, onProgress) =>
+      (_provider, _request, onProgress, onLog) =>
         new Promise((resolve) => {
           onProgress?.({
             progress: 0.4,
             text: "Downloading weights",
             elapsedSeconds: 12.4,
+          });
+          onLog?.({
+            id: "log-1",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            level: "info",
+            stage: "review",
+            message: "Downloading weights",
           });
           finish = resolve;
         }),
@@ -273,7 +391,8 @@ describe("App", () => {
     chooseTinyModel();
     expect(await screen.findByRole("heading", { name: "Local model ready." })).toBeInTheDocument();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    expect(screen.getByRole("button", { name: "View logs" })).toBeDisabled();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
 
     expect(
       await screen.findByRole("heading", {
@@ -285,11 +404,8 @@ describe("App", () => {
     expect(within(loading).getByText("40%")).toBeInTheDocument();
     expect(within(loading).getByText("12s elapsed")).toBeInTheDocument();
     expect(
-      within(loading).queryByText("Downloading model weights"),
-    ).not.toBeInTheDocument();
-    expect(
-      within(loading).queryByText("Downloading weights"),
-    ).not.toBeInTheDocument();
+      within(loading).getByText("Downloading model weights"),
+    ).toBeInTheDocument();
     expect(
       within(loading).getByText(/first visit fetches model shards/),
     ).toBeInTheDocument();
@@ -298,87 +414,206 @@ describe("App", () => {
         `Download ~${REVIEW_CONFIG.model.downloadSizeMB.toLocaleString()} MB`,
       ),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "View logs" })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Local model logs")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View logs" })).toBeEnabled();
+
+    await view.click(screen.getByRole("button", { name: "View logs" }));
+    expect(
+      screen.getByLabelText("Local model logs"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("Local model logs")).getByText(
+        "Downloading weights",
+      ),
+    ).toBeInTheDocument();
 
     finish?.(reviewResult);
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
   });
 
   it("shows local review details while WebLLM is analyzing", async () => {
     runReview.mockImplementation(
-      (_request, onProgress) =>
+      (_provider, _request, onProgress, onLog) =>
         new Promise(() => {
           onProgress?.({
             progress: 1,
             text: "Prefilling the prompt on WebGPU…",
             elapsedSeconds: 4.2,
           });
+          onLog?.({
+            id: "log-review",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            level: "info",
+            stage: "review",
+            message: "Starting a local code review.",
+          });
+          onLog?.({
+            id: "log-prefill",
+            timestamp: "2026-01-01T00:00:01.000Z",
+            level: "info",
+            stage: "generation",
+            message: "Local model is ready. Prefilling the prompt on WebGPU.",
+          });
         }),
     );
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
 
     expect(
-      await screen.findByRole("heading", { name: "Teaching your translation" }),
+      await screen.findByRole("heading", { name: "Reviewing your code" }),
     ).toBeInTheDocument();
     const loading = screen.getByRole("status");
     expect(within(loading).getByText("4.2s elapsed")).toBeInTheDocument();
     expect(
-      within(loading).queryByText("Prefilling the prompt on WebGPU"),
-    ).not.toBeInTheDocument();
-    expect(
-      within(loading).queryByText("Prefilling the prompt on WebGPU…"),
-    ).not.toBeInTheDocument();
+      within(loading).getByText("Prefilling the prompt on WebGPU"),
+    ).toBeInTheDocument();
     expect(
       within(loading).getByText(/WebLLM still prefills your prompt/),
     ).toBeInTheDocument();
-    expect(within(loading).getByText("Polite")).toBeInTheDocument();
-    expect(screen.queryByRole("list")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Local model logs")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "View logs" })).not.toBeInTheDocument();
+    expect(within(loading).getByText("Python")).toBeInTheDocument();
+    expect(
+      within(loading).getByText(`Model: ${REVIEW_CONFIG.model.id}`),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        screen.getByRole("list", { name: "Review activity" }),
+      ).getByText("Local model is ready. Prefilling the prompt on WebGPU."),
+    ).toBeInTheDocument();
   });
 
+  it("shows cloud GPU connection details while a review is in flight", async () => {
+    getSession.mockResolvedValue(user);
+    listInferenceProviders.mockResolvedValue([modalProvider]);
+    runReview.mockImplementation(
+      (_provider, _request, _onProgress, onLog) =>
+        new Promise(() => {
+          onLog?.({
+            id: "log-cloud",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            level: "info",
+            stage: "cloud-request",
+            message: "Connecting to the cloud GPU.",
+          });
+        }),
+    );
+    const view = await renderApp();
+    await view.selectOptions(
+      screen.getByLabelText("Inference provider"),
+      "modal",
+    );
+    chooseCloudModel();
+    loadExample();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
 
+    expect(
+      await screen.findByRole("heading", {
+        name: "Connecting to the cloud GPU",
+      }),
+    ).toBeInTheDocument();
+    const loading = screen.getByRole("status");
+    expect(
+      within(loading).getByText("Sending the review to the API"),
+    ).toBeInTheDocument();
+    expect(
+      within(loading).getByText(/first review after idle/),
+    ).toBeInTheDocument();
+    expect(within(loading).getByText("Modal GPU Cloud")).toBeInTheDocument();
+    expect(
+      within(loading).getByText(`Model: ${modalProvider.modelId}`),
+    ).toBeInTheDocument();
+    expect(within(loading).getByText("Timeout: 55s")).toBeInTheDocument();
+    expect(
+      within(
+        screen.getByRole("list", { name: "Connection activity" }),
+      ).getByText("Connecting to the cloud GPU."),
+    ).toBeInTheDocument();
+  });
+
+  it("shows GPU boot details while the cloud worker is still starting", async () => {
+    getSession.mockResolvedValue(user);
+    listInferenceProviders.mockResolvedValue([modalProvider]);
+    runReview.mockImplementation(
+      (_provider, _request, onProgress, onLog) =>
+        new Promise(() => {
+          onProgress?.({
+            progress: 0,
+            text: "The provider is starting up.",
+            elapsedSeconds: 8,
+          });
+          onLog?.({
+            id: "log-boot",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            level: "debug",
+            stage: "cloud-http",
+            message: "Retrying after retryable upstream status.",
+          });
+        }),
+    );
+    const view = await renderApp();
+    await view.selectOptions(
+      screen.getByLabelText("Inference provider"),
+      "modal",
+    );
+    chooseCloudModel();
+    loadExample();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: "GPU is starting, retrying…" }),
+    ).toBeInTheDocument();
+    const loading = screen.getByRole("status");
+    expect(within(loading).getByText("GPU worker is booting")).toBeInTheDocument();
+    expect(
+      within(loading).getByText(/API retries while the GPU container starts/),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        screen.getByRole("list", { name: "Connection activity" }),
+      ).getByText("Retrying after retryable upstream status."),
+    ).toBeInTheDocument();
+  });
 
   it("saves a completed review after sign-in and reopens it from history", async () => {
     getSession.mockResolvedValue(user);
+    listInferenceProviders.mockResolvedValue([modalProvider]);
     listHistory.mockResolvedValue([historySummary]);
     const view = await renderApp();
 
     await view.click(screen.getByRole("link", { name: "Dashboard" }));
-    await screen.findByRole("button", { name: "Polite" });
-    await view.click(screen.getByRole("link", { name: "Conversation" }));
+    await screen.findByRole("button", { name: "Browser WebLLM Python" });
+    await view.click(screen.getByRole("link", { name: "Review" }));
 
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
 
-    await view.click(screen.getByRole("button", { name: "Save lesson" }));
+    await view.click(screen.getByRole("button", { name: /Null crash/ }));
+    await view.click(screen.getByRole("button", { name: /Null crash/ }));
+
+    await view.click(screen.getByRole("button", { name: "Save review" }));
     await waitFor(() =>
       expect(saveHistory).toHaveBeenCalledWith(
-        expect.objectContaining({ code: EXAMPLES.polite, language: "polite" }),
+        expect.objectContaining({ code: EXAMPLES.python, language: "python" }),
       ),
     );
-    expect(await screen.findByRole("heading", { name: "Your conversations" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Your reviews" })).toBeInTheDocument();
 
-    await view.click(screen.getByRole("button", { name: "Polite" }));
+    await view.click(screen.getByRole("button", { name: "Browser WebLLM Python" }));
     expect(
-      await screen.findByRole("heading", { name: /my japanese AI/ }),
+      await screen.findByRole("heading", { name: /Review your code/ }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("English to translate")).toHaveValue("pass");
+    expect(screen.getByLabelText("Code to review")).toHaveValue("pass");
   });
 
   it("sends anonymous users to sign in when they try to save", async () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    await screen.findByText("よろしくお願いします。");
-    await view.click(screen.getByRole("button", { name: "Save lesson" }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    await screen.findByText("Solid work");
+    await view.click(screen.getByRole("button", { name: "Save review" }));
     expect(
       await screen.findByRole("heading", { name: "Sign in" }),
     ).toBeInTheDocument();
@@ -393,30 +628,30 @@ describe("App", () => {
     await view.click(screen.getByRole("link", { name: "Dashboard" }));
     expect(await screen.findByText("Could not load history.")).toBeInTheDocument();
 
-    await view.click(screen.getByRole("link", { name: "Conversation" }));
+    await view.click(screen.getByRole("link", { name: "Review" }));
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    await screen.findByText("よろしくお願いします。");
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    await screen.findByText("Solid work");
 
     saveHistory.mockRejectedValueOnce(new Error("Disk full"));
-    await view.click(screen.getByRole("button", { name: "Save lesson" }));
+    await view.click(screen.getByRole("button", { name: "Save review" }));
     await waitFor(() => expect(saveHistory).toHaveBeenCalled());
     expect(screen.getByRole("alert")).toHaveTextContent("Disk full");
     expect(
-      screen.getByRole("heading", { name: /my japanese AI/ }),
+      screen.getByRole("heading", { name: /Review your code/ }),
     ).toBeInTheDocument();
 
     listHistory.mockResolvedValue([historySummary]);
     await view.click(screen.getByRole("link", { name: "Dashboard" }));
-    await screen.findByRole("button", { name: "Polite" });
+    await screen.findByRole("button", { name: "Browser WebLLM Python" });
     getHistoryEntry.mockRejectedValueOnce(new Error("Could not open history."));
-    await view.click(screen.getByRole("button", { name: "Polite" }));
+    await view.click(screen.getByRole("button", { name: "Browser WebLLM Python" }));
     expect(
       await screen.findAllByText("Could not open history."),
     ).not.toHaveLength(0);
     deleteHistory.mockRejectedValueOnce("nope");
-    await view.click(screen.getByRole("button", { name: "Delete saved lesson" }));
+    await view.click(screen.getByRole("button", { name: "Delete saved review" }));
     await view.click(screen.getByRole("button", { name: "Delete" }));
     expect(
       await screen.findAllByText("Could not delete history."),
@@ -429,13 +664,13 @@ describe("App", () => {
     const view = await renderApp();
 
     await view.click(screen.getByRole("link", { name: "Dashboard" }));
-    expect(await screen.findByRole("heading", { name: "Your conversations" })).toBeInTheDocument();
-    await view.click(screen.getByRole("button", { name: "Delete saved lesson" }));
+    expect(await screen.findByRole("heading", { name: "Your reviews" })).toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: "Delete saved review" }));
     await view.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteHistory).toHaveBeenCalledWith(historyEntry.id));
-    expect(screen.getByText("No saved conversation yet")).toBeInTheDocument();
+    expect(screen.getByText("No saved reviews yet")).toBeInTheDocument();
 
-    await view.click(screen.getByRole("link", { name: "Conversation" }));
+    await view.click(screen.getByRole("link", { name: "Review" }));
 
     await view.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(logout).toHaveBeenCalled());
@@ -450,7 +685,7 @@ describe("App", () => {
     listHistory.mockResolvedValue([historySummary]);
     const view = await renderApp("/dashboard");
 
-    await screen.findByRole("button", { name: "Polite" });
+    await screen.findByRole("button", { name: "Browser WebLLM Python" });
     expect(screen.queryByText("Favorites")).not.toBeInTheDocument();
     await view.click(screen.getByRole("button", { name: "Star favorite" }));
     await waitFor(() =>
@@ -465,7 +700,7 @@ describe("App", () => {
     starHistory.mockRejectedValueOnce(new Error("Could not update favorite."));
     const view = await renderApp("/dashboard");
 
-    await screen.findByRole("button", { name: "Polite" });
+    await screen.findByRole("button", { name: "Browser WebLLM Python" });
     await view.click(screen.getByRole("button", { name: "Star favorite" }));
     expect(
       await screen.findAllByText("Could not update favorite."),
@@ -476,58 +711,63 @@ describe("App", () => {
     const view = await renderApp();
     loadExample();
     await view.selectOptions(
-      screen.getByLabelText("Load an example register"),
-      "casual",
+      screen.getByLabelText("Load an example"),
+      "typescript",
     );
-    expect(screen.getByLabelText("English to translate")).toHaveValue(EXAMPLES.casual);
+    expect(screen.getByLabelText("Code to review")).toHaveValue(EXAMPLES.typescript);
     await view.selectOptions(
-      screen.getByLabelText("Load an example register"),
-      "formal",
+      screen.getByLabelText("Load an example"),
+      "go",
     );
-    expect(screen.getByLabelText("English to translate")).toHaveValue(EXAMPLES.formal);
+    expect(screen.getByLabelText("Code to review")).toHaveValue(EXAMPLES.go);
     await view.selectOptions(
-      screen.getByLabelText("Load an example register"),
-      "polite",
+      screen.getByLabelText("Load an example"),
+      "rust",
     );
-    expect(screen.getByLabelText("English to translate")).toHaveValue(EXAMPLES.polite);
+    expect(screen.getByLabelText("Code to review")).toHaveValue(EXAMPLES.rust);
+    await view.selectOptions(
+      screen.getByLabelText("Load an example"),
+      "cpp",
+    );
+    expect(screen.getByLabelText("Code to review")).toHaveValue(EXAMPLES.cpp);
 
     const clear = screen.getByRole("button", { name: "Clear" });
-    const runReviewButton = screen.getByRole("button", { name: /Run lesson/ });
+    const runReviewButton = screen.getByRole("button", { name: /Run review/ });
     expect(
       clear.compareDocumentPosition(runReviewButton) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
 
     await view.click(clear);
-    expect(screen.getByLabelText("English to translate")).toHaveValue("");
+    expect(screen.getByLabelText("Code to review")).toHaveValue("");
   });
 
   it("uploads a source file into the editor and infers the language", async () => {
     const view = await renderApp();
     loadExample();
-    expect(screen.getByLabelText("English to translate")).toHaveValue(EXAMPLES.polite);
+    expect(screen.getByLabelText("Code to review")).toHaveValue(EXAMPLES.python);
 
     const input = document.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
     expect(input).toBeTruthy();
-    expect(input.accept).toContain(".txt");
+    expect(input.accept).toContain(".py");
 
     await view.click(screen.getByRole("button", { name: "Upload" }));
     const source = "package main\n\nfunc main() {}\n";
     await view.upload(
       input,
-      new File([source], "email.md", { type: "text/plain" }),
+      new File([source], "server.go", { type: "text/plain" }),
     );
 
-    expect(screen.getByLabelText("English to translate")).toHaveValue(source);
-    expect(screen.getByLabelText("Load an example register")).toHaveValue("polite");
+    expect(screen.getByLabelText("Code to review")).toHaveValue(source);
+    expect(screen.getByLabelText("Load an example")).toHaveValue("go");
   });
 
   it("keeps the current language when the uploaded file has no known extension", async () => {
     await renderApp();
-    fireEvent.change(screen.getByLabelText("Load an example register"), {
-      target: { value: "formal" },
+    fireEvent.change(screen.getByLabelText("Load an example"), {
+      target: { value: "rust" },
     });
     const input = document.querySelector(
       'input[type="file"]',
@@ -535,14 +775,14 @@ describe("App", () => {
     const source = "fn main() {}";
     fireEvent.change(input, {
       target: {
-        files: [new File([source], "notes", { type: "text/plain" })],
+        files: [new File([source], "notes.txt", { type: "text/plain" })],
       },
     });
 
     await waitFor(() =>
-      expect(screen.getByLabelText("English to translate")).toHaveValue(source),
+      expect(screen.getByLabelText("Code to review")).toHaveValue(source),
     );
-    expect(screen.getByLabelText("Load an example register")).toHaveValue("formal");
+    expect(screen.getByLabelText("Load an example")).toHaveValue("rust");
   });
 
   it("toasts when an uploaded file is empty or unreadable", async () => {
@@ -553,14 +793,14 @@ describe("App", () => {
 
     await view.upload(
       input,
-      new File(["   \n"], "empty.txt", { type: "text/plain" }),
+      new File(["   \n"], "empty.py", { type: "text/plain" }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "That file is empty.",
     );
-    expect(screen.getByLabelText("English to translate")).toHaveValue("");
+    expect(screen.getByLabelText("Code to review")).toHaveValue("");
 
-    const unreadable = new File(["print(1)"], "broken.txt", {
+    const unreadable = new File(["print(1)"], "broken.py", {
       type: "text/plain",
     });
     vi.spyOn(unreadable, "text").mockRejectedValue(new Error("read failed"));
@@ -580,15 +820,40 @@ describe("App", () => {
     const source = `${"x".repeat(limit + 1)}\n`;
     await view.upload(
       input,
-      new File([source], "big.txt", { type: "text/plain" }),
+      new File([source], "big.py", { type: "text/plain" }),
     );
 
-    expect(screen.getByLabelText("English to translate")).toHaveValue(source);
+    expect(screen.getByLabelText("Code to review")).toHaveValue(source);
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      `File loaded, but this model accepts up to ${limit.toLocaleString()} characters per lesson.`,
+      `File loaded, but this model accepts up to ${limit.toLocaleString()} characters per review.`,
     );
   });
 
+  it("warns with the cloud model limit when uploading oversized code", async () => {
+    getSession.mockResolvedValue(user);
+    listInferenceProviders.mockResolvedValue([
+      { ...modalProvider, maxCodeCharacters: 120 },
+    ]);
+    const view = await renderApp();
+    await view.selectOptions(
+      screen.getByLabelText("Inference provider"),
+      "modal",
+    );
+    chooseCloudModel();
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const source = `${"y".repeat(121)}\n`;
+    await view.upload(
+      input,
+      new File([source], "big.py", { type: "text/plain" }),
+    );
+
+    expect(screen.getByLabelText("Code to review")).toHaveValue(source);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "File loaded, but this model accepts up to 120 characters per review.",
+    );
+  });
 
   it("ignores upload changes that do not include a file", async () => {
     await renderApp();
@@ -596,7 +861,7 @@ describe("App", () => {
       'input[type="file"]',
     ) as HTMLInputElement;
     fireEvent.change(input, { target: { files: null } });
-    expect(screen.getByLabelText("English to translate")).toHaveValue("");
+    expect(screen.getByLabelText("Code to review")).toHaveValue("");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -604,49 +869,51 @@ describe("App", () => {
     const view = await renderApp();
     loadExample();
     chooseTinyModel();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
 
     await view.click(screen.getByRole("link", { name: "Go to home" }));
-    expect(screen.getByLabelText("English to translate")).toHaveValue("");
-    expect(screen.queryByText("よろしくお願いします。")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Code to review")).toHaveValue("");
+    expect(screen.queryByText("Solid work")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: /my japanese AI/ }),
+      screen.getByRole("heading", { name: /Review your code/ }),
     ).toBeInTheDocument();
   });
 
   it("shows generating copy once while tokens stream", async () => {
-    runReview.mockImplementation((_request, onProgress) => {
+    runReview.mockImplementation((_provider, _request, onProgress) => {
       onProgress?.({
         progress: 1,
-        text: "Generating the lesson…",
-        streamedText: '{"translation":',
+        text: "Generating the review…",
+        streamedText: '{"score":',
       });
       return new Promise(() => {});
     });
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
 
     expect(
-      await screen.findByRole("heading", { name: "Generating the lesson…" }),
+      await screen.findByRole("heading", { name: "Generating the review…" }),
     ).toBeInTheDocument();
-    expect(screen.getAllByText("Generating the lesson…")).toHaveLength(1);
+    expect(screen.getAllByText("Generating the review…")).toHaveLength(1);
     expect(screen.getAllByText("Loading and generating…").length).toBeGreaterThan(0);
     expect(
-      screen.getByRole("log", { name: "Generated lesson output" }),
-    ).toHaveTextContent('{"translation":');
+      screen.getByRole("log", { name: "Generated review output" }),
+    ).toHaveTextContent('{"score":');
   });
 
   it("renders a review section as soon as a partial result arrives", async () => {
-    runReview.mockImplementation((_request, onProgress) => {
+    runReview.mockImplementation((_provider, _request, onProgress) => {
       onProgress?.({
         progress: 1,
-        text: "Generating the lesson…",
+        text: "Generating the review…",
         result: {
-          translation: "よろしくお願いします。",
-          lesson: "Use a polite closing.",
+          score: 88,
+          summary: "Solid work",
+          metrics: [],
+          findings: [],
           durationMs: 400,
           partial: true,
         },
@@ -656,28 +923,31 @@ describe("App", () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
 
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
-        expect(screen.getByText("Teaching…")).toBeInTheDocument();
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
+    expect(screen.getByText("88")).toBeInTheDocument();
+    expect(screen.getByText("Reviewing…")).toBeInTheDocument();
     expect(screen.getAllByText("Loading and generating…")).toHaveLength(1);
     expect(
       screen.queryByText(
-        "Building a Japanese translation and teaching notes…",
+        "The model is still writing metrics, findings, and remaining analysis.",
       ),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole("log", { name: "Generated lesson output" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Save lesson" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("log", { name: "Generated review output" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save review" })).not.toBeInTheDocument();
   });
 
   it("keeps a streamed local review if final JSON validation fails", async () => {
-    runReview.mockImplementation(async (_request, onProgress) => {
+    runReview.mockImplementation(async (_provider, _request, onProgress) => {
       onProgress?.({
         progress: 1,
-        text: "Generating the lesson…",
+        text: "Generating the review…",
         result: {
-          translation: "よろしくお願いします。",
-          lesson: "Use a polite closing.",
+          score: 88,
+          summary: "Solid work",
+          metrics: [],
+          findings: [],
           durationMs: 400,
           partial: true,
         },
@@ -687,19 +957,20 @@ describe("App", () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
 
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
-        expect(screen.queryByText("TinySwallow returned invalid JSON.")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save lesson" })).toBeInTheDocument();
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
+    expect(screen.getByText("88")).toBeInTheDocument();
+    expect(screen.queryByText("TinySwallow returned invalid JSON.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save review" })).toBeInTheDocument();
   });
 
   it("cancels an in-flight review without a toast when returning home", async () => {
     runReview.mockImplementation(
-      (_request, _onProgress, _onLog, signal) =>
+      (_provider, _request, _onProgress, _onLog, signal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener("abort", () => {
-            const error = new Error("Lesson cancelled.");
+            const error = new Error("Review cancelled.");
             error.name = "AbortError";
             reject(error);
           });
@@ -708,42 +979,191 @@ describe("App", () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     expect(await screen.findByRole("button", { name: "Cancel" })).toBeInTheDocument();
 
     await view.click(screen.getByRole("link", { name: "Go to home" }));
-    expect(screen.getByLabelText("English to translate")).toHaveValue("");
-    expect(screen.queryByText("Lesson cancelled.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Code to review")).toHaveValue("");
+    expect(screen.queryByText("Review cancelled.")).not.toBeInTheDocument();
   });
 
-  it("shows TinySwallow model defaults after selecting a model", async () => {
+  it("places TinySwallow under inference and updates configs with the runtime", async () => {
+    listInferenceProviders.mockResolvedValue([modalProvider]);
     const view = await renderApp();
 
-    expect(screen.queryByLabelText("Inference provider")).not.toBeInTheDocument();
-    const model = screen.getByLabelText("Teaching model");
+    const inference = screen.getByLabelText("Inference provider");
+    const model = screen.getByLabelText("Review model");
+    expect(within(inference).getByRole("option", { name: "Modal GPU Cloud" })).toBeInTheDocument();
+    expect(
+      within(inference).getByRole("option", { name: "Browser · WebLLM (Recommended)" }),
+    ).toBeInTheDocument();
+    expect(
+      inference.compareDocumentPosition(model) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
     expect(model).toHaveValue("");
+    expect(
+      screen.queryByText(`Model: ${REVIEW_CONFIG.model.id}`),
+    ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Temperature")).not.toBeInTheDocument();
 
     await view.selectOptions(model, REVIEW_CONFIG.defaultModelId);
     expect(model).toHaveValue(REVIEW_CONFIG.defaultModelId);
     expect(
+      screen.getByText(`Model: ${REVIEW_CONFIG.model.id}`),
+    ).toBeInTheDocument();
+    expect(
       screen.getByText(
-        `Download: ~${REVIEW_CONFIG.model.downloadSizeMB.toLocaleString()} MB`,
+        `Selecting this model downloads and caches approximately ${REVIEW_CONFIG.model.downloadSizeMB.toLocaleString()} MB of model data.`,
       ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Temperature")).toHaveValue("0.2");
+
+    await view.selectOptions(inference, "modal");
+    expect(model).toHaveValue("");
+    expect(
+      screen.queryByText(`Model: ${modalProvider.modelId}`),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Temperature")).not.toBeInTheDocument();
+
+    await view.selectOptions(model, modalProvider.modelId);
+    expect(model).toHaveValue(modalProvider.modelId);
+    expect(
+      screen.getByText(`Model: ${modalProvider.modelId}`),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Temperature")).toHaveValue("0.1");
+
+    await view.selectOptions(inference, "browser");
+    await waitFor(() => expect(model).toHaveValue(""));
+    expect(
+      screen.queryByText(`Model: ${REVIEW_CONFIG.model.id}`),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Temperature")).not.toBeInTheDocument();
+  });
+
+  it("shows Hugging Face Cloud and Modal GPU Cloud in the inference toggle", async () => {
+    listInferenceProviders.mockResolvedValue([
+      { ...huggingfaceProvider, label: "Hugging Face Inference" },
+      { ...modalProvider, label: "Modal Cloud GPU" },
+    ]);
+    await renderApp();
+
+    const inference = screen.getByLabelText("Inference provider");
+    expect(
+      within(inference).getByRole("option", { name: "Hugging Face Cloud" }),
+    ).toBeInTheDocument();
+    expect(
+      within(inference).getByRole("option", { name: "Modal GPU Cloud" }),
+    ).toBeInTheDocument();
+    expect(
+      within(inference).queryByRole("option", { name: "Hugging Face Inference" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(inference).queryByRole("option", { name: "Modal Cloud GPU" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reloads TinySwallow defaults when the model is selected", async () => {
+    await renderApp();
+    chooseTinyModel();
+
+    const temperature = screen.getByLabelText("Temperature");
+    expect(temperature).toHaveAttribute("type", "range");
+    expect(temperature).toHaveAttribute("min", "0");
+    expect(temperature).toHaveAttribute("max", "1");
+    expect(temperature).toHaveAccessibleDescription(
+      "Control randomness. Lower keeps reviews consistent. Higher makes findings more varied.",
+    );
+    expect(
+      screen.getByLabelText("Maximum output tokens"),
+    ).toHaveAccessibleDescription(
+      "Caps generated review length. Short is faster; longer budgets are less likely to cut off the output.",
+    );
+    expect(
+      screen.getByRole("tooltip", {
+        hidden: true,
+        name: "Control randomness. Lower keeps reviews consistent. Higher makes findings more varied.",
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("tooltip", {
         hidden: true,
-        name: `Selecting this model downloads and caches approximately ${REVIEW_CONFIG.model.downloadSizeMB.toLocaleString()} MB of model data.`,
+        name: "Caps generated review length. Short is faster; longer budgets are less likely to cut off the output.",
       }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Temperature")).toHaveValue("0.2");
+    expect(
+      screen.getByRole("tooltip", {
+        hidden: true,
+        name: "Max source characters so instructions and the review still fit in the 4K window.",
+      }),
+    ).toBeInTheDocument();
+    fireEvent.change(temperature, { target: { value: "0.9" } });
+    expect(temperature).toHaveValue("0.9");
+    fireEvent.change(temperature, { target: { value: "2" } });
+    expect(temperature).toHaveValue("1");
+
+    fireEvent.change(screen.getByLabelText("Review model"), {
+      target: { value: REVIEW_CONFIG.defaultModelId },
+    });
+    expect(temperature).toHaveValue("0.2");
+    expect(
+      screen.getByText(`Model: ${REVIEW_CONFIG.model.id}`),
+    ).toBeInTheDocument();
   });
 
-
-  it("updates generation parameters for the browser model", async () => {
+  it("reloads cloud model defaults when the deployed model is selected", async () => {
+    listInferenceProviders.mockResolvedValue([modalProvider]);
     const view = await renderApp();
-    chooseTinyModel();
+
+    await view.selectOptions(screen.getByLabelText("Inference provider"), "modal");
+    expect(screen.getByLabelText("Review model")).toHaveValue("");
+    expect(screen.queryByLabelText("Temperature")).not.toBeInTheDocument();
+
+    chooseCloudModel();
+    expect(screen.getByLabelText("Review model")).toHaveValue(
+      modalProvider.modelId,
+    );
+
+    const temperature = screen.getByLabelText("Temperature");
+    fireEvent.change(temperature, { target: { value: "0.9" } });
+    expect(temperature).toHaveValue("0.9");
+
+    fireEvent.change(screen.getByLabelText("Review model"), {
+      target: { value: modalProvider.modelId },
+    });
+    expect(temperature).toHaveValue("0.1");
+    expect(
+      screen.getByText(`Model: ${modalProvider.modelId}`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tooltip", {
+        hidden: true,
+        name: "How long the API waits for a cloud review.",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tooltip", {
+        hidden: true,
+        name: "Per-user cloud review cap in this app.",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("updates generation parameters and loads cloud provider settings", async () => {
+    getSession.mockResolvedValue(user);
+    listInferenceProviders.mockResolvedValue([modalProvider]);
+    const view = await renderApp();
+
+    await view.selectOptions(
+      screen.getByLabelText("Inference provider"),
+      "modal",
+    );
+    expect(
+      screen.queryByText("Runs on a dedicated Modal GPU."),
+    ).not.toBeInTheDocument();
+
+    chooseCloudModel();
+    expect(screen.getByText("Runs on a dedicated Modal GPU.")).toBeInTheDocument();
 
     const temperature = screen.getByLabelText("Temperature");
     fireEvent.change(temperature, { target: { value: "0.8" } });
@@ -755,82 +1175,89 @@ describe("App", () => {
     );
 
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     await waitFor(() =>
       expect(runReview).toHaveBeenCalledWith(
+        "modal",
         expect.objectContaining({
           parameters: expect.objectContaining({
             temperature: 0.8,
             maxTokens: 256,
+            maxFindings: 3,
           }),
         }),
         expect.any(Function),
-        undefined,
+        expect.any(Function),
         expect.any(AbortSignal),
       ),
     );
   });
 
-
-
-  it("reloads TinySwallow defaults when the model is selected", async () => {
-    await renderApp();
-    chooseTinyModel();
-
-    const temperature = screen.getByLabelText("Temperature");
-    expect(temperature).toHaveAttribute("type", "range");
-    expect(temperature).toHaveAttribute("min", "0");
-    expect(temperature).toHaveAttribute("max", "1");
-    expect(temperature).toHaveAccessibleDescription(
-      "Control randomness. Lower keeps lessons consistent. Higher makes teaching notes more varied.",
+  it("restores a cloud review and its generation settings from history", async () => {
+    getSession.mockResolvedValue(user);
+    listInferenceProviders.mockResolvedValue([modalProvider]);
+    const cloudEntry = {
+      ...historyEntry,
+      result: {
+        ...reviewResult,
+        inference: {
+          ...reviewResult.inference!,
+          provider: "modal" as const,
+          generationConfig: { temperature: 0.1, maxTokens: 256 },
+        },
+      },
+    };
+    listHistory.mockResolvedValue([
+      {
+        ...historySummary,
+        provider: "modal",
+        temperature: 0.1,
+        maxTokens: 256,
+        maxFindings: undefined,
+      },
+    ]);
+    getHistoryEntry.mockResolvedValue(cloudEntry);
+    const view = await renderApp();
+    await view.click(screen.getByRole("link", { name: "Dashboard" }));
+    await view.click(
+      screen.getByRole("button", { name: "Modal GPU Cloud Python" }),
     );
-    expect(
-      screen.getByLabelText("Maximum output tokens"),
-    ).toHaveAccessibleDescription(
-      "Caps generated lesson length. Short is faster; longer budgets are less likely to cut off the output.",
+    expect(await screen.findByLabelText("Inference provider")).toHaveValue(
+      "modal",
     );
-    expect(
-      screen.getByRole("tooltip", {
-        hidden: true,
-        name: "Control randomness. Lower keeps lessons consistent. Higher makes teaching notes more varied.",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("tooltip", {
-        hidden: true,
-        name: "Caps generated lesson length. Short is faster; longer budgets are less likely to cut off the output.",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("tooltip", {
-        hidden: true,
-        name: "Max English characters so instructions and the lesson still fit in the 4K window.",
-      }),
-    ).toBeInTheDocument();
-    fireEvent.change(temperature, { target: { value: "0.9" } });
-    expect(temperature).toHaveValue("0.9");
-    fireEvent.change(temperature, { target: { value: "2" } });
-    expect(temperature).toHaveValue("1");
-
-    fireEvent.change(screen.getByLabelText("Teaching model"), {
-      target: { value: REVIEW_CONFIG.defaultModelId },
-    });
-    expect(temperature).toHaveValue("0.2");
+    expect(screen.getByLabelText("Review model")).toHaveValue(
+      modalProvider.modelId,
+    );
+    expect(screen.getByLabelText("Temperature")).toHaveValue("0.1");
   });
 
+  it("falls back to the browser provider when a saved cloud backend disappears", async () => {
+    listInferenceProviders.mockRejectedValue(new Error("offline"));
+    await renderApp();
+    expect(screen.getByLabelText("Inference provider")).toHaveValue("browser");
+    expect(within(screen.getByLabelText("Inference provider")).queryByRole("option", { name: /Modal/ })).toBeNull();
+  });
 
+  it("falls back to the browser runtime when the default cloud provider is unavailable", async () => {
+    defaultProvider.current = "custom";
+    listInferenceProviders.mockResolvedValue([modalProvider]);
+    await renderApp();
+    await waitFor(() =>
+      expect(screen.getByLabelText("Inference provider")).toHaveValue("browser"),
+    );
+  });
 
-
-
-
-  it("authenticates from the login form", async () => {
+  it("opens documentation and authenticates from the login form", async () => {
     const view = await renderApp();
+    await view.click(screen.getByRole("link", { name: "Documentation" }));
+    expect(screen.getByRole("heading", { name: "Documentation" })).toBeInTheDocument();
+
     await view.click(screen.getByRole("link", { name: "Sign in" }));
     await view.type(screen.getByLabelText("Email"), "m@example.com");
     await view.type(screen.getByLabelText("Password"), "password1");
     const signInButtons = screen.getAllByRole("button", { name: "Sign in" });
     await view.click(signInButtons[signInButtons.length - 1]);
-    expect(await screen.findByRole("heading", { name: "Your conversations" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Your reviews" })).toBeInTheDocument();
   });
 
   it("shows a non-Error review failure", async () => {
@@ -838,17 +1265,17 @@ describe("App", () => {
     chooseTinyModel();
     loadExample();
     runReview.mockRejectedValue("boom");
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    expect(await screen.findByText("Could not run the lesson.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "View logs" })).not.toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(await screen.findByText("Could not run the review.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View logs" })).toBeDisabled();
   });
 
   it("cancels an in-flight review", async () => {
     runReview.mockImplementation(
-      (_request, _onProgress, _onLog, signal) =>
+      (_provider, _request, _onProgress, _onLog, signal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener("abort", () => {
-            const error = new Error("Lesson cancelled.");
+            const error = new Error("Review cancelled.");
             error.name = "AbortError";
             reject(error);
           });
@@ -857,24 +1284,24 @@ describe("App", () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     await view.click(await screen.findByRole("button", { name: "Cancel" }));
-    expect(await screen.findByText("Lesson cancelled.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Run lesson/ })).toBeInTheDocument();
+    expect(await screen.findByText("Review cancelled.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Run review/ })).toBeInTheDocument();
   });
 
   it("lets you continue a cancelled WebLLM review from the last tokens", async () => {
     runReview.mockImplementation(
-      (_request, onProgress, _onLog, signal) =>
+      (_provider, _request, onProgress, _onLog, signal) =>
         new Promise((_resolve, reject) => {
           onProgress?.({
             progress: 1,
-            text: "Generating the lesson…",
-            streamedText: '{"translation": 80, "summary":',
+            text: "Generating the review…",
+            streamedText: '{"score": 80, "summary":',
           });
           signal?.addEventListener("abort", () => {
             reject(
-              new ReviewInterruptedError('{"translation": 80, "summary":', {
+              new ReviewInterruptedError('{"score": 80, "summary":', {
                 elapsedMs: 1500,
               }),
             );
@@ -884,59 +1311,61 @@ describe("App", () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     await view.click(await screen.findByRole("button", { name: "Cancel" }));
 
     expect(
-      await screen.findByText("Lesson paused. Continue from where it stopped."),
+      await screen.findByText("Review paused. Continue from where it stopped."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Lesson interrupted")).toBeInTheDocument();
+    expect(screen.getByText("Review interrupted")).toBeInTheDocument();
     expect(
-      screen.getByRole("log", { name: "Generated lesson output" }),
-    ).toHaveTextContent('{"translation": 80, "summary":');
+      screen.getByRole("log", { name: "Generated review output" }),
+    ).toHaveTextContent('{"score": 80, "summary":');
     expect(
-      screen.getAllByRole("button", { name: "Continue lesson" }).length,
+      screen.getAllByRole("button", { name: "Continue review" }).length,
     ).toBeGreaterThan(0);
 
     runReview.mockImplementation(
-      (request) => {
-        expect(request.resumeFrom).toBe('{"translation": 80, "summary":');
+      (_provider, request) => {
+        expect(request.resumeFrom).toBe('{"score": 80, "summary":');
         expect(request.resumeElapsedMs).toBe(1500);
         return Promise.resolve(reviewResult);
       },
     );
-    await view.click(screen.getAllByRole("button", { name: "Continue lesson" })[0]);
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
+    await view.click(screen.getAllByRole("button", { name: "Continue review" })[0]);
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Continue lesson" }),
+      screen.queryByRole("button", { name: "Continue review" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Run lesson/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Run review/ })).toBeInTheDocument();
   });
 
-  it("keeps a partial translation after interrupt and can start the review over", async () => {
+  it("keeps a partial score after interrupt and can start the review over", async () => {
     runReview.mockImplementation(
-      (_request, onProgress, _onLog, signal) =>
+      (_provider, _request, onProgress, _onLog, signal) =>
         new Promise((_resolve, reject) => {
           onProgress?.({
             progress: 1,
-            text: "Generating the lesson…",
+            text: "Generating the review…",
             result: {
-              translation: "よろしくお願いします。",
-              lesson: "Use a polite closing.",
-                  durationMs: 400,
+              score: 88,
+              summary: "Solid work",
+              metrics: [],
+              findings: [],
+              durationMs: 400,
               partial: true,
             },
           });
           signal?.addEventListener("abort", () => {
             reject(
-              new ReviewInterruptedError(
-                '{"translation": "よろしくお願いします。", "lesson": "Use a polite closing."',
-                {
+              new ReviewInterruptedError('{"score": 88, "summary": "Solid work"', {
                 elapsedMs: 400,
                 partialResult: {
-                  translation: "よろしくお願いします。",
-                  lesson: "Use a polite closing.",
-                          durationMs: 400,
+                  score: 88,
+                  summary: "Solid work",
+                  metrics: [],
+                  findings: [],
+                  durationMs: 400,
                   partial: true,
                 },
               }),
@@ -947,20 +1376,21 @@ describe("App", () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     await view.click(await screen.findByRole("button", { name: "Cancel" }));
 
     expect(await screen.findByText("Interrupted")).toBeInTheDocument();
-    expect(screen.getByText("よろしくお願いします。")).toBeInTheDocument();
-    expect(screen.queryByText("88")).not.toBeInTheDocument();
+    expect(screen.getByText("Solid work")).toBeInTheDocument();
+    expect(screen.getByText("88")).toBeInTheDocument();
 
     runReview.mockResolvedValue(reviewResult);
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     await waitFor(() =>
       expect(runReview).toHaveBeenLastCalledWith(
+        "browser",
         expect.objectContaining({ resumeFrom: undefined }),
         expect.any(Function),
-        undefined,
+        expect.any(Function),
         expect.any(AbortSignal),
       ),
     );
@@ -970,13 +1400,13 @@ describe("App", () => {
     const view = await renderApp();
     chooseTinyModel();
     loadExample();
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
-    expect(await screen.findByText("よろしくお願いします。")).toBeInTheDocument();
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
+    expect(await screen.findByText("Solid work")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("English to translate"), {
-      target: { value: EXAMPLES.polite },
+    fireEvent.change(screen.getByLabelText("Code to review"), {
+      target: { value: EXAMPLES.python },
     });
-    expect(screen.getByText("よろしくお願いします。")).toBeInTheDocument();
+    expect(screen.getByText("Solid work")).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Ready when you are" }),
     ).not.toBeInTheDocument();
@@ -989,11 +1419,11 @@ describe("App", () => {
     const error = new Error("Failed to fetch model shard.");
     error.name = "AbortError";
     runReview.mockRejectedValue(error);
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     expect(
       await screen.findByText("Failed to fetch model shard."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Lesson cancelled.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Review cancelled.")).not.toBeInTheDocument();
   });
 
   it("renders a 404 for unknown routes", async () => {
@@ -1001,7 +1431,26 @@ describe("App", () => {
     expect(
       screen.getByRole("heading", { name: "Page not found" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to lesson" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to review" })).toBeInTheDocument();
+  });
+
+  it("redirects legacy documentation hashes", async () => {
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/", hash: "#docs/overview" }]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("heading", { name: "Documentation" })).toBeInTheDocument();
+  });
+
+  it("switches the chrome into Japanese", async () => {
+    const view = await renderApp();
+    await view.click(screen.getByRole("button", { name: "日本語" }));
+    expect(screen.getByRole("link", { name: "レビュー" })).toBeInTheDocument();
+    expect(document.documentElement.lang).toBe("ja");
+    await view.click(screen.getByRole("button", { name: "EN" }));
+    expect(screen.getByRole("link", { name: "Review" })).toBeInTheDocument();
+    expect(document.documentElement.lang).toBe("en");
   });
 
   it("sends signed-out users from protected routes to sign in", async () => {
@@ -1056,7 +1505,7 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "WebGPU is unavailable" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Local TinySwallow lessons need WebGPU in this tab."),
+      screen.getByText("Local TinySwallow reviews need WebGPU in this tab."),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/HTTPS or http:\/\/localhost/, { exact: false }),
@@ -1080,7 +1529,7 @@ describe("App", () => {
         "Unable to find a compatible GPU. Enable WebGPU in your browser, then confirm a hardware adapter at https://webgpureport.org/.",
       ),
     );
-    await view.click(screen.getByRole("button", { name: /Run lesson/ }));
+    await view.click(screen.getByRole("button", { name: /Run review/ }));
     expect(
       await screen.findByRole("heading", { name: "WebGPU is unavailable" }),
     ).toBeInTheDocument();
@@ -1091,14 +1540,24 @@ describe("App", () => {
     preloadBrowserModel.mockRejectedValueOnce("offline");
     await renderApp();
     chooseTinyModel();
-    expect(await screen.findByText("Could not run the lesson.")).toBeInTheDocument();
+    expect(await screen.findByText("Could not run the review.")).toBeInTheDocument();
   });
 
   it("ignores browser preload updates after unmount", async () => {
     let onProgress: ((progress: { progress: number; text: string }) => void) | undefined;
+    let onLog:
+      | ((entry: {
+          id: string;
+          timestamp: string;
+          level: string;
+          stage: string;
+          message: string;
+        }) => void)
+      | undefined;
     let finish: (value?: unknown) => void = () => {};
-    preloadBrowserModel.mockImplementation((progress) => {
+    preloadBrowserModel.mockImplementation((progress, log) => {
       onProgress = progress;
+      onLog = log;
       return new Promise((resolve) => {
         finish = resolve;
       });
@@ -1112,8 +1571,22 @@ describe("App", () => {
     chooseTinyModel();
     await waitFor(() => expect(preloadBrowserModel).toHaveBeenCalled());
     onProgress?.({ progress: 0.4, text: "Downloading weights" });
+    onLog?.({
+      id: "log-preload",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      level: "info",
+      stage: "download",
+      message: "Fetching shards",
+    });
     pending.unmount();
     onProgress?.({ progress: 0.8, text: "Compiling" });
+    onLog?.({
+      id: "log-preload-late",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      level: "info",
+      stage: "download",
+      message: "Late shard",
+    });
     finish();
     await Promise.resolve();
   });

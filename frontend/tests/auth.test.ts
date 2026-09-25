@@ -127,7 +127,6 @@ describe("auth service", () => {
     const exported = {
       exportedAt: "2026-01-01T00:00:00.000Z",
       user,
-      truncated: false,
       reviews: [],
     };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(exported)));

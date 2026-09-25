@@ -22,9 +22,9 @@ describe("Dashboard", () => {
     renderDashboard(<Dashboard entries={[]} {...actions} />);
 
     expect(
-      screen.getByRole("heading", { name: "Your conversations" }),
+      screen.getByRole("heading", { name: "Your reviews" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("No saved conversation yet")).toBeInTheDocument();
+    expect(screen.getByText("No saved reviews yet")).toBeInTheDocument();
     expect(screen.queryByText(/Hello,/)).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Run a Review" }),
@@ -36,7 +36,7 @@ describe("Dashboard", () => {
       <Dashboard
         entries={[
           historySummary,
-          { ...historySummary, id: "second", translation: "こんにちは。" },
+          { ...historySummary, id: "second", score: 72 },
         ]}
         {...actions}
       />,
@@ -44,7 +44,7 @@ describe("Dashboard", () => {
 
     expect(
       screen.getAllByRole("button", {
-        name: "Polite",
+        name: "Browser WebLLM Python",
       }),
     ).toHaveLength(2);
   });

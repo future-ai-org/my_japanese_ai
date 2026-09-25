@@ -88,7 +88,7 @@ async def test_session_create_lookup_and_destroy(monkeypatch):
 
     cookie = response.headers["set-cookie"]
     token = cookie.split("=", 1)[1].split(";", 1)[0]
-    assert cookie.startswith("japanese_session=")
+    assert cookie.startswith("ai_session=")
     assert "HttpOnly" in cookie
     assert "SameSite=lax" in cookie
     assert "expires_at <= NOW()" in pool.connection_value.calls[0][0]
@@ -153,11 +153,11 @@ async def test_production_session_cookie_uses_host_prefix(monkeypatch):
     response = Response()
     await auth.create_session(response, "user-id")
     cookie = response.headers["set-cookie"]
-    assert cookie.startswith("__Host-japanese_session=")
+    assert cookie.startswith("__Host-ai_session=")
     assert "HttpOnly" in cookie
     assert "Secure" in cookie
     assert "SameSite=lax" in cookie
-    assert "Domain=" not in cookie.split("japanese_session")[-1]
+    assert "Domain=" not in cookie.split("ai_session")[-1]
 
 
 async def test_auth_attempt_count_optional_identity_filters():

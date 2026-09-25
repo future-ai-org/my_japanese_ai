@@ -28,6 +28,13 @@ async def purge_expired_data() -> None:
             """,
             (settings.history_retention_days,),
         )
+        await connection.execute(
+            """
+            DELETE FROM inference_requests
+            WHERE created_at < NOW() - (%s * INTERVAL '1 day')
+            """,
+            (settings.inference_requests_retention_days,),
+        )
 
 
 async def cleanup_loop() -> None:

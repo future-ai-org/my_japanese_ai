@@ -52,7 +52,8 @@ export function toHistorySummary(
     codePreview: entry.code.split("\n")[0] ?? "",
     lineCount: entry.code ? entry.code.split("\n").length : 0,
     characterCount: entry.code.length,
-    translation: entry.result.translation,
+    score: entry.result.score,
+    summary: entry.result.summary,
     starred: Boolean(entry.starred),
   };
   if (inference?.provider) {
@@ -66,6 +67,9 @@ export function toHistorySummary(
   }
   if (typeof config?.maxTokens === "number") {
     summary.maxTokens = config.maxTokens;
+  }
+  if (typeof config?.maxFindings === "number") {
+    summary.maxFindings = config.maxFindings;
   }
   if (typeof entry.result.durationMs === "number") {
     summary.durationMs = entry.result.durationMs;

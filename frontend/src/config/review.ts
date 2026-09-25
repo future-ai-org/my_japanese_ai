@@ -3,7 +3,11 @@ import {
   modelVersion,
   type AppConfig,
 } from "@mlc-ai/web-llm";
-import { type ReviewParameters } from "../types/review";
+import {
+  isInferenceProvider,
+  type InferenceProvider,
+  type ReviewParameters,
+} from "../types/review";
 import { numberFromEnv, stringFromEnv } from "./env";
 
 export {
@@ -29,6 +33,10 @@ function cacheBackendFromEnv(
   value: string | undefined,
 ): "cache" | "indexeddb" {
   return value === "cache" ? value : "indexeddb";
+}
+
+function inferenceProviderFromEnv(value: string | undefined): InferenceProvider {
+  return value && isInferenceProvider(value) ? value : "browser";
 }
 
 function powerPreferenceFromEnv(
@@ -91,6 +99,11 @@ const tokenMedium = numberFromEnv(
   384,
   1,
 );
+const detailedMinTokens = numberFromEnv(
+  import.meta.env.VITE_REVIEW_DETAILED_MIN_TOKENS,
+  tokenMedium,
+  1,
+);
 const tokenizerFiles = stringFromEnv(
   import.meta.env.VITE_WEBLLM_TOKENIZER_FILES,
   "tokenizer.json,tokenizer.model",
@@ -146,6 +159,11 @@ const tinySwallowModel = {
       4_000,
       1,
     ),
+    maxFindings: numberFromEnv(
+      import.meta.env.VITE_REVIEW_MAX_FINDINGS,
+      3,
+      0,
+    ),
     maxTokens: numberFromEnv(
       import.meta.env.VITE_REVIEW_MAX_TOKENS_LIMIT,
       1024,
@@ -163,11 +181,15 @@ const tinySwallowModel = {
 };
 
 export const REVIEW_CONFIG = {
+  defaultProvider: inferenceProviderFromEnv(
+    import.meta.env.VITE_INFERENCE_DEFAULT_PROVIDER,
+  ),
   defaultModelId: tinySwallowModel.id,
   models: [tinySwallowModel],
   model: tinySwallowModel,
   limits: tinySwallowModel.limits,
   generation: tinySwallowModel.generation,
+  detailedMinTokens,
   parameterMins: {
     maxTokens: numberFromEnv(
       import.meta.env.VITE_REVIEW_MAX_TOKENS_MIN,
@@ -206,6 +228,11 @@ export const REVIEW_CONFIG = {
     browserPrefillSeconds: numberFromEnv(
       import.meta.env.VITE_BROWSER_PREFILL_PHASE_SECONDS,
       1,
+      0,
+    ),
+    cloudWaitSeconds: numberFromEnv(
+      import.meta.env.VITE_CLOUD_WAIT_PHASE_SECONDS,
+      3,
       0,
     ),
   },
@@ -278,6 +305,10 @@ export const REVIEW_CONFIG = {
 
 export type ReviewModel = (typeof REVIEW_CONFIG.models)[number];
 
+export function getReviewModel(modelId: string | undefined): ReviewModel {
+  return reviewModelForRuntimeId(modelId) ?? REVIEW_CONFIG.models[0];
+}
+
 export function reviewModelForRuntimeId(
   runtimeModelId: string | undefined,
 ): ReviewModel | undefined {
@@ -297,6 +328,7 @@ export function parametersForModel(model: ReviewModel): ReviewParameters {
   return {
     temperature: model.generation.temperature,
     maxTokens: Math.min(model.generation.maxTokens, model.limits.maxTokens),
+    maxFindings: model.limits.maxFindings,
   };
 }
 

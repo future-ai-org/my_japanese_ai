@@ -8,6 +8,8 @@ export type BrowserLoadingPhase =
   | "ready"
   | "other";
 
+const LOADING_ACTIVITY_STAGES = new Set(["storage", "gpu", "model-load"]);
+
 export function progressLogFingerprint(text: string): string {
   return text
     .toLowerCase()
@@ -35,6 +37,10 @@ export function webLlmProgressRatio(
     return clamped;
   }
   return Math.max(clamped, Math.min(current / total, 1));
+}
+
+export function isBrowserLoadingActivityLog(stage: string): boolean {
+  return LOADING_ACTIVITY_STAGES.has(stage);
 }
 
 export function browserLoadingPhase(text: string): BrowserLoadingPhase {

@@ -1,3 +1,4 @@
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -12,16 +13,7 @@ from ..util import is_number, isoformat, json_object
 
 router = APIRouter(prefix=API_HISTORY_PREFIX)
 
-# Cheap result/metadata projections shared by list SELECT and star RETURNING.
-_SUMMARY_RESULT_COLUMNS = """
-  COALESCE(result->>'translation', result->>'summary', '') AS translation,
-  result#>>'{inference,provider}' AS provider,
-  result#>>'{inference,modelId}' AS model_id,
-  result#>'{inference,generationConfig}' AS generation_config,
-  (result->>'durationMs')::double precision AS duration_ms
-"""
-
-_SUMMARY_COLUMNS = f"""
+_SUMMARY_COLUMNS = """
   id,
   language,
   split_part(code, E'\\n', 1) AS code_preview,
@@ -30,16 +22,14 @@ _SUMMARY_COLUMNS = f"""
     ELSE cardinality(string_to_array(code, E'\\n'))
   END AS line_count,
   COALESCE(char_length(code), 0) AS character_count,
-  {_SUMMARY_RESULT_COLUMNS.strip()},
-  starred,
-  created_at
-"""
-
-# Star only flips `starred`; skip code scans used for list previews/counts.
-_STAR_RETURNING_COLUMNS = f"""
-  id,
-  language,
-  {_SUMMARY_RESULT_COLUMNS.strip()},
+  COALESCE(result->>'summary', '') AS summary,
+  COALESCE(
+    (result->>'score')::double precision, 0
+  )::int AS score,
+  result#>>'{inference,provider}' AS provider,
+  result#>>'{inference,modelId}' AS model_id,
+  result#>'{inference,generationConfig}' AS generation_config,
+  (result->>'durationMs')::double precision AS duration_ms,
   starred,
   created_at
 """
@@ -65,11 +55,11 @@ def _serialize_summary(row: dict[str, Any]) -> dict[str, Any]:
         "id": str(row["id"]),
         "language": row["language"],
         "createdAt": isoformat(row["created_at"]),
-        "translation": row["translation"] or "",
+        "codePreview": row["code_preview"] or "",
+        "score": int(row["score"] or 0),
+        "summary": row["summary"] or "",
         "starred": _is_starred(row),
     }
-    if "code_preview" in row:
-        payload["codePreview"] = row["code_preview"] or ""
     line_count = row.get("line_count")
     if is_number(line_count):
         payload["lineCount"] = int(line_count)
@@ -81,13 +71,21 @@ def _serialize_summary(row: dict[str, Any]) -> dict[str, Any]:
     if row.get("model_id"):
         payload["modelId"] = row["model_id"]
     config = row.get("generation_config")
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except json.JSONDecodeError:
+            config = None
     if isinstance(config, dict):
         temperature = config.get("temperature")
         max_tokens = config.get("maxTokens")
+        max_findings = config.get("maxFindings")
         if is_number(temperature):
             payload["temperature"] = temperature
         if is_number(max_tokens):
             payload["maxTokens"] = max_tokens
+        if is_number(max_findings):
+            payload["maxFindings"] = max_findings
     duration_ms = row.get("duration_ms")
     if is_number(duration_ms):
         payload["durationMs"] = duration_ms
@@ -97,8 +95,10 @@ def _serialize_summary(row: dict[str, Any]) -> dict[str, Any]:
 def _is_review_result(value: Any) -> bool:
     return (
         isinstance(value, dict)
-        and isinstance(value.get("translation"), str)
-        and isinstance(value.get("lesson"), str)
+        and is_number(value.get("score"))
+        and isinstance(value.get("summary"), str)
+        and isinstance(value.get("findings"), list)
+        and isinstance(value.get("metrics"), list)
         and is_number(value.get("durationMs"))
     )
 
@@ -226,7 +226,7 @@ async def star_history(entry_id: str, request: Request) -> JSONResponse:
                 UPDATE review_history
                 SET starred = %s
                 WHERE id = %s AND user_id = %s
-                RETURNING {_STAR_RETURNING_COLUMNS}
+                RETURNING {_SUMMARY_COLUMNS}
                 """,
                 (body["starred"], entry_id, user["id"]),
             )

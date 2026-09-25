@@ -11,7 +11,7 @@ import {
   exportAccount,
   type User,
 } from "../services/auth";
-import { t } from "../i18n/messages";
+import { useLocale } from "../i18n/locale";
 
 interface AccountPanelProps {
   user: User;
@@ -33,6 +33,7 @@ function downloadExport(payload: unknown) {
 }
 
 export function AccountPanel({ user, onDeleted }: AccountPanelProps) {
+  const { t } = useLocale();
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -132,6 +133,7 @@ export function AccountPanel({ user, onDeleted }: AccountPanelProps) {
           <ShieldCheck size={14} />
           {t("account.retention", {
             history: APP_CONFIG.retention.historyDays,
+            inference: APP_CONFIG.retention.inferenceRequestsDays,
           })}
         </p>
       </div>

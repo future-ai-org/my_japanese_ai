@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { HistoryPanel } from "./HistoryPanel";
 import { paths } from "../docs/paths";
-import { t } from "../i18n/messages";
+import { useLocale } from "../i18n/locale";
 import type { ReviewHistorySummary } from "../types/review";
 
 interface DashboardProps {
@@ -21,6 +21,7 @@ export function Dashboard({
   onStar,
   onDelete,
 }: DashboardProps) {
+  const { t } = useLocale();
 
   return (
     <section className="dashboard-view" aria-labelledby="dashboard-title">

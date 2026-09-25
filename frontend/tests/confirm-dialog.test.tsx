@@ -10,7 +10,7 @@ describe("ConfirmDialog", () => {
     const view = userEvent.setup();
     render(
       <ConfirmDialog
-        title="Delete this lesson?"
+        title="Delete this review?"
         body="Gone for good."
         confirmLabel="Delete"
         cancelLabel="Cancel"

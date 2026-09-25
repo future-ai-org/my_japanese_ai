@@ -36,7 +36,7 @@ async def test_purge_expired_data_deletes_sessions_history_and_attempts(
     assert "DELETE FROM user_sessions" in queries
     assert "DELETE FROM auth_attempts" in queries
     assert "DELETE FROM review_history" in queries
-    assert "inference_requests" not in queries
+    assert "DELETE FROM inference_requests" in queries
 
 
 async def test_cleanup_loop_logs_failures_and_reraises_cancel(monkeypatch, caplog):

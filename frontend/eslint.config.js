@@ -25,6 +25,7 @@ export default tseslint.config(
         {
           allowConstantExport: true,
           allowExportNames: [
+            "useLocale",
             "useToast",
             "useSession",
             "useReviewSession",

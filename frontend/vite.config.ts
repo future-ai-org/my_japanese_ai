@@ -11,7 +11,7 @@ function contentSecurityPolicy(options?: {
   const scriptSrc = options?.allowInlineScripts
     ? "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'"
     : "script-src 'self' 'wasm-unsafe-eval'";
-  const port = options?.port ?? 8048;
+  const port = options?.port ?? 8022;
   return [
     "default-src 'self'",
     scriptSrc,
@@ -39,7 +39,7 @@ const SECURITY_HEADERS = {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, repoRoot, "");
-  const port = Number(env.PORT) > 0 ? Number(env.PORT) : 8048;
+  const port = Number(env.PORT) > 0 ? Number(env.PORT) : 8022;
   const apiOrigin = env.BACKEND_DEV_ORIGIN || "http://127.0.0.1:8000";
   return {
     envDir: repoRoot,
@@ -57,7 +57,7 @@ export default defineConfig(({ mode }) => {
         include: ["src/**/*.{ts,tsx}"],
         exclude: ["src/vite-env.d.ts"],
         thresholds: {
-          lines:75,
+          lines: 100,
         },
       },
     },

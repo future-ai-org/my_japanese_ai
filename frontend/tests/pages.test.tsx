@@ -6,6 +6,7 @@ import { ReviewSessionProvider } from "../src/context/ReviewSessionContext";
 import { SessionProvider, useSession } from "../src/context/SessionContext";
 import { useReviewSession } from "../src/context/ReviewSessionContext";
 import { ToastProvider } from "../src/context/ToastContext";
+import { LocaleProvider } from "../src/i18n/locale";
 import { AccountPage } from "../src/pages/AccountPage";
 import { DashboardPage } from "../src/pages/DashboardPage";
 
@@ -28,17 +29,23 @@ vi.mock("../src/services/history", () => ({
   toHistorySummary: vi.fn(),
 }));
 
+vi.mock("../src/services/reviewCloud", () => ({
+  listInferenceProviders: vi.fn().mockResolvedValue([]),
+}));
+
 vi.mock("../src/services/review", () => ({
   preloadBrowserModel: vi.fn().mockResolvedValue({}),
 }));
 
 function Providers({ children }: { children: ReactNode }) {
   return (
-    <ToastProvider>
-      <SessionProvider>
-        <ReviewSessionProvider>{children}</ReviewSessionProvider>
-      </SessionProvider>
-    </ToastProvider>
+    <LocaleProvider>
+      <ToastProvider>
+        <SessionProvider>
+          <ReviewSessionProvider>{children}</ReviewSessionProvider>
+        </SessionProvider>
+      </ToastProvider>
+    </LocaleProvider>
   );
 }
 

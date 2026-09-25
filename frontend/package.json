@@ -1,5 +1,5 @@
 {
-  "name": "my-japanese-ai",
+  "name": "ai-code-review",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -15,6 +15,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@codemirror/lang-cpp": "^6.0.3",
+    "@codemirror/lang-go": "^6.0.1",
+    "@codemirror/lang-javascript": "^6.2.4",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-rust": "^6.0.2",
     "@codemirror/view": "^6.43.11",
     "@fontsource/noto-sans-jp": "^5.3.0",
     "@fontsource/nunito": "^5.3.0",

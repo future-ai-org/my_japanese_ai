@@ -6,7 +6,7 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   document.documentElement.lang = "en";
-  document.title = "my japanese AI";
+  document.title = "AI Code Review";
 });
 
 Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {

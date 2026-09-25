@@ -15,21 +15,21 @@ concurrency:
 
 jobs:
   test-backend:
-    name: ⭐ Backend tests
+    name: 🐟 Backend tests
     runs-on: ubuntu-latest
     steps:
-      - name: ⭐ Check out repository
+      - name: 🐟 Check out repository
         uses: actions/checkout@v5
 
-      - name: ⭐ Set up uv
+      - name: 🐟 Set up uv
         uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.11"
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
 
-      - name: ⭐ Install Python dependencies
+      - name: 🐟 Install Python dependencies
         run: make python-install
 
-      - name: ⭐ Test backend
+      - name: 🐟 Test backend
         run: make test-py

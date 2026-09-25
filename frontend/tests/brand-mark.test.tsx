@@ -5,13 +5,11 @@ import { BrandMark } from "../src/components/BrandMark";
 describe("BrandMark", () => {
   it("renders the product name by default", () => {
     render(<BrandMark />);
-    expect(screen.getByLabelText("my japanese AI")).toHaveTextContent(
-      "my japanese AI",
-    );
+    expect(screen.getByLabelText("code.review")).toHaveTextContent("code.review");
   });
 
   it("hides the product name when compact", () => {
     render(<BrandMark compact />);
-    expect(screen.getByLabelText("my japanese AI")).not.toHaveTextContent("my");
+    expect(screen.getByLabelText("code.review")).not.toHaveTextContent("code");
   });
 });

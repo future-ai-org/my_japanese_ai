@@ -1,8 +1,9 @@
 import { X } from "lucide-react";
-import { t } from "../i18n/messages";
+import { useLocale } from "../i18n/locale";
 import { useToast } from "../context/ToastContext";
 
 export function ToastHost() {
+  const { t } = useLocale();
   const { toasts, dismissToast } = useToast();
   if (toasts.length === 0) return null;
 

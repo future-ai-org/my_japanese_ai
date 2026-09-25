@@ -11,8 +11,10 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from .cleanup import cleanup_loop
 from .config import APP_TITLE, HEALTH_PATHS, get_settings
 from .database import close_pool
+from .http import close_http_client, get_http_client
 from .routes.auth import router as auth_router
 from .routes.history import router as history_router
+from .routes.review import router as review_router
 from .security import CsrfOriginMiddleware, SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,7 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     for warning in settings.production_config_warnings():
         logger.warning("%s", warning)
+    await get_http_client()
     cleanup_task = asyncio.create_task(cleanup_loop())
     try:
         yield
@@ -89,6 +92,7 @@ async def lifespan(_: FastAPI):
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
+        await close_http_client()
         await close_pool()
 
 
@@ -104,6 +108,7 @@ app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(auth_router)
 app.include_router(history_router)
+app.include_router(review_router)
 
 
 def _health_payload() -> dict[str, Any]:

@@ -75,7 +75,7 @@ describe("AuthPanel", () => {
     expect(screen.queryByText("New account")).not.toBeInTheDocument();
     expect(
       screen.queryByText(
-        "Save lessons securely and access them from your dashboard.",
+        "Save reviews securely and access them from your dashboard.",
       ),
     ).not.toBeInTheDocument();
 

@@ -12,13 +12,15 @@ import type { ReviewHistoryEntry } from "../src/types/review";
 
 const entry: ReviewHistoryEntry = {
   id: "8f4cb94c-3396-4d33-9582-b16dcb884ec6",
-  language: "polite",
+  language: "python",
   code: "pass",
   createdAt: "2026-01-01T00:00:00.000Z",
   starred: false,
   result: {
-    translation: "よろしくお願いします。",
-    lesson: "Good",
+    score: 90,
+    summary: "Good",
+    findings: [],
+    metrics: [],
     durationMs: 12,
   },
 };
@@ -174,12 +176,13 @@ describe("history service", () => {
       }),
     ).toEqual({
       id: entry.id,
-      language: "polite",
+      language: "python",
       createdAt: entry.createdAt,
       codePreview: "first line",
       lineCount: 2,
       characterCount: 17,
-      translation: "よろしくお願いします。",
+      score: 90,
+      summary: "Good",
       starred: false,
       provider: "browser",
       temperature: 0.2,

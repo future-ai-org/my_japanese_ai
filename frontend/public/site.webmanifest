@@ -1,17 +1,12 @@
 {
-  "name": "my japanese AI",
-  "short_name": "my japanese AI",
-  "description": "AI-assisted English→Japanese teaching.",
+  "name": "AI Code Review",
+  "short_name": "AI Review",
+  "description": "AI-assisted code review with TinySwallow.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f6f3fb",
-  "theme_color": "#4a3f78",
+  "background_color": "#f7f7f5",
+  "theme_color": "#0d0d0d",
   "icons": [
-    {
-      "src": "/lavender-star.svg",
-      "sizes": "any",
-      "type": "image/svg+xml"
-    },
     {
       "src": "/favicon.ico",
       "sizes": "48x48",

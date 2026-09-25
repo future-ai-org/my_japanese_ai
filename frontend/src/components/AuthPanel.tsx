@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { login, register, type User } from "../services/auth";
 import { APP_CONFIG } from "../config/app";
 import { paths } from "../docs/paths";
-import { t } from "../i18n/messages";
+import { useLocale } from "../i18n/locale";
 
 export type AuthMode = "login" | "register";
 
@@ -14,6 +14,7 @@ interface AuthPanelProps {
 }
 
 export function AuthPanel({ mode, onAuthenticated }: AuthPanelProps) {
+  const { t } = useLocale();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

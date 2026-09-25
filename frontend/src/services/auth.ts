@@ -14,7 +14,6 @@ interface AuthResponse {
 export interface AccountExport {
   exportedAt: string;
   user: User;
-  truncated: boolean;
   reviews: Array<{
     id: string;
     language: string;
